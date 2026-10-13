@@ -442,6 +442,51 @@ struct WindowCreateContext {
     parent_hwnd: Option<HWND>,
 }
 
+/// Re-enables a modal dialog's owner when the dialog fails to finish opening.
+///
+/// `WindowKind::Dialog` disables its owner as soon as the owner is resolved, but
+/// several fallible steps follow before a `WindowsWindow` exists to take over
+/// that responsibility. Any of them returning early would otherwise leave the
+/// owner disabled for the lifetime of the process: `Drop for WindowsWindow` never
+/// runs, so `DestroyWindow` is never called, so the `WM_DESTROY` handler that
+/// re-enables the owner is never reached, and the user is left with a main window
+/// that cannot be clicked and no window to close.
+///
+/// Ownership therefore moves in one step: the guard holds it until the window is
+/// constructed, [`Self::disarm`] hands it to `WindowsWindow`, and from then on
+/// `handle_destroy_msg` is what re-enables the owner.
+struct DisabledOwnerGuard(Option<HWND>);
+
+impl DisabledOwnerGuard {
+    /// Disable `owner` and take responsibility for putting it back.
+    fn disable(owner: HWND) -> Self {
+        unsafe {
+            let _ = EnableWindow(owner, false);
+        }
+        Self(Some(owner))
+    }
+
+    fn owner(&self) -> Option<HWND> {
+        self.0
+    }
+
+    /// The window was created, so `WM_DESTROY` re-enables the owner from here on.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DisabledOwnerGuard {
+    fn drop(&mut self) {
+        if let Some(owner) = self.0 {
+            unsafe {
+                let _ = EnableWindow(owner, true);
+                let _ = SetForegroundWindow(owner);
+            }
+        }
+    }
+}
+
 impl WindowsWindow {
     pub(crate) fn new(
         handle: AnyWindowHandle,
@@ -470,19 +515,27 @@ impl WindowsWindow {
             internal_drag_active,
         } = creation_info;
         register_window_class(icon);
-        let parent_hwnd = if params.kind == WindowKind::Dialog {
-            let parent_window = unsafe { GetActiveWindow() };
-            if parent_window.is_invalid() {
-                None
+        // Disabling the owner is what makes a dialog modal, and it is a resource
+        // that has to be released on every path out of this function.
+        let mut owner_guard = if params.kind == WindowKind::Dialog {
+            let owner = unsafe { GetActiveWindow() };
+            if owner.is_invalid() {
+                // The window is still created: a caller that asked for a dialog
+                // wants its content on screen either way. Say so, though, because
+                // neither consequence is visible in the `Ok` this returns. It is
+                // not modal, and it also gains a taskbar button -- the dialog
+                // ex-style is `WS_EX_DLGMODALFRAME` and deliberately omits
+                // `WS_EX_APPWINDOW`, but the shell only suppresses the button for
+                // an *owned* window, and this one has no owner.
+                log::warn!(
+                    "WindowKind::Dialog requested with no active window to own it; opening it non-modal"
+                );
+                DisabledOwnerGuard(None)
             } else {
-                // Disable the parent window to make this dialog modal
-                unsafe {
-                    EnableWindow(parent_window, false).as_bool();
-                };
-                Some(parent_window)
+                DisabledOwnerGuard::disable(owner)
             }
         } else {
-            None
+            DisabledOwnerGuard(None)
         };
         let parent_hwnd = owner_guard.owner();
         let hide_title_bar = params
