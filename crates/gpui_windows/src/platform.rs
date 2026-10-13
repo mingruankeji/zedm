@@ -97,6 +97,9 @@ pub(crate) struct WindowsPlatformState {
     /// Shared with each window to coordinate draws across windows on the UI
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    /// Shared with every window so captured pointer messages are only handed
+    /// across HWNDs while GPUI owns a typed in-process drag.
+    pub(crate) internal_drag_active: Rc<Cell<bool>>,
     directx_devices: RefCell<Option<DirectXDevices>>,
 }
 
@@ -126,6 +129,7 @@ impl WindowsPlatformState {
             current_cursor: Cell::new(current_cursor),
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
+            internal_drag_active: Rc::new(Cell::new(false)),
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
         }
@@ -315,6 +319,7 @@ impl WindowsPlatform {
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
+            internal_drag_active: self.inner.state.internal_drag_active.clone(),
         }
     }
 
@@ -1433,6 +1438,8 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    /// Shared with [`WindowsPlatformState::internal_drag_active`] and every other window.
+    pub(crate) internal_drag_active: Rc<Cell<bool>>,
 }
 
 struct PlatformWindowCreateContext {
