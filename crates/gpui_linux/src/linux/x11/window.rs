@@ -257,7 +257,6 @@ pub struct Callbacks {
 }
 
 pub struct X11WindowState {
-    pub destroyed: bool,
     external_drag_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     parent: Option<X11WindowStatePtr>,
     children: FxHashSet<xproto::Window>,
@@ -853,7 +852,6 @@ impl X11WindowState {
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
-                destroyed: false,
                 external_drag_cancel: None,
                 client_side_decorations_supported,
                 decorations: WindowDecorations::Server,
