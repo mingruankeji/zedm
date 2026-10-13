@@ -11,6 +11,9 @@ mod directx_renderer;
 mod dispatcher;
 mod display;
 mod events;
+mod external_drag;
+#[cfg(test)]
+mod external_drag_tests;
 mod keyboard;
 mod platform;
 mod system_notifications;

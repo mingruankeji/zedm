@@ -93,6 +93,7 @@ pub struct WindowsWindowState {
 }
 
 pub(crate) struct WindowsWindowInner {
+    drag_lifetime: RefCell<Option<Arc<()>>>,
     hwnd: HWND,
     pub(crate) dialog_owner: Rc<crate::dialog::DialogOwner>,
     drop_target_helper: IDropTargetHelper,
@@ -283,6 +284,7 @@ impl WindowsWindowInner {
         )?;
 
         Ok(Rc::new(Self {
+            drag_lifetime: RefCell::new(Some(Arc::new(()))),
             hwnd,
             dialog_owner: crate::dialog::DialogOwner::new(hwnd),
             drop_target_helper: context.drop_target_helper.clone(),
@@ -475,6 +477,7 @@ impl WindowsWindow {
         } else {
             None
         };
+        let parent_hwnd = owner_guard.owner();
         let hide_title_bar = params
             .titlebar
             .as_ref()
@@ -588,6 +591,7 @@ impl WindowsWindow {
             }));
         }
 
+        owner_guard.disarm();
         Ok(Self(this))
     }
 }
@@ -610,6 +614,7 @@ impl rwh::HasDisplayHandle for WindowsWindow {
 
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
+        self.0.drag_lifetime.borrow_mut().take();
         self.0.dialog_owner.close();
         unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
         // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
@@ -632,6 +637,29 @@ impl Drop for WindowsWindow {
 }
 
 impl PlatformWindow for WindowsWindow {
+    fn can_start_external_drag(&self) -> bool {
+        true
+    }
+    fn supports_virtual_file_drag(&self) -> bool {
+        true
+    }
+    fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
+        let lifetime = self.drag_lifetime.borrow();
+        let Some(lifetime) = lifetime.as_ref() else {
+            return false;
+        };
+        // GPUI has captured the gesture; OLE's drag apartment takes it over.
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        crate::external_drag::start(
+            payload.clone(),
+            Arc::downgrade(lifetime),
+            self.hwnd.0 as isize,
+            self.validation_number,
+        )
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.state.bounds()
     }
@@ -1142,7 +1170,7 @@ impl accesskit::ActionHandler for A11yActionHandler {
 }
 
 #[implement(IDropTarget)]
-struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
+struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>, Cell<bool>);
 
 impl WindowsDragDropHandler {
     fn handle_drag_drop(&self, input: PlatformInput) {
@@ -1163,6 +1191,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         unsafe {
+            self.1.set(false);
             let idata_obj = pdataobj.ok()?;
             let config = FORMATETC {
                 cfFormat: CF_HDROP.0,
@@ -1173,13 +1202,15 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
             };
             let cursor_position = POINT { x: pt.x, y: pt.y };
             if idata_obj.QueryGetData(&config as _) == S_OK {
-                *pdweffect = DROPEFFECT_COPY;
+                *pdweffect = DROPEFFECT_NONE;
                 let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
                     return Ok(());
                 };
                 if idata.u.hGlobal.is_invalid() {
                     return Ok(());
                 }
+                self.1.set(true);
+                *pdweffect = DROPEFFECT_COPY;
                 let hdrop = HDROP(idata.u.hGlobal.0);
                 let mut paths = SmallVec::<[PathBuf; 2]>::new();
                 with_file_names(hdrop, |file_name| {
@@ -1202,6 +1233,19 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                     paths: ExternalPaths(paths),
                 });
                 self.handle_drag_drop(input);
+            } else if crate::external_drag::is_source_drag(idata_obj, self.0.validation_number) {
+                self.1.set(true);
+                *pdweffect = DROPEFFECT_COPY;
+                let mut position = cursor_position;
+                ScreenToClient(self.0.hwnd, &mut position).ok().log_err();
+                self.handle_drag_drop(PlatformInput::FileDrop(FileDropEvent::Entered {
+                    position: logical_point(
+                        position.x as f32,
+                        position.y as f32,
+                        self.0.state.scale_factor.get(),
+                    ),
+                    paths: ExternalPaths::default(),
+                }));
             } else {
                 *pdweffect = DROPEFFECT_NONE;
             }
@@ -1219,6 +1263,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if !self.1.get() {
+            unsafe {
+                *pdweffect = DROPEFFECT_NONE;
+            }
+            return Ok(());
+        }
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
             *pdweffect = DROPEFFECT_COPY;
@@ -1244,6 +1294,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     }
 
     fn DragLeave(&self) -> windows::core::Result<()> {
+        self.1.set(false);
         unsafe {
             self.0.drop_target_helper.DragLeave().log_err();
         }
@@ -1260,6 +1311,12 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
+        if !self.1.replace(false) {
+            unsafe {
+                *pdweffect = DROPEFFECT_NONE;
+            }
+            return Ok(());
+        }
         let idata_obj = pdataobj.ok()?;
         let mut cursor_position = POINT { x: pt.x, y: pt.y };
         unsafe {
@@ -1515,7 +1572,7 @@ fn get_module_handle() -> HMODULE {
 
 fn register_drag_drop(window: &Rc<WindowsWindowInner>) -> Result<()> {
     let window_handle = window.hwnd;
-    let handler = WindowsDragDropHandler(window.clone());
+    let handler = WindowsDragDropHandler(window.clone(), Cell::new(false));
     // The lifetime of `IDropTarget` is handled by Windows, it won't release until
     // we call `RevokeDragDrop`.
     // So, it's safe to drop it here.

@@ -28,6 +28,8 @@ pub(crate) const WM_GPUI_FORCE_UPDATE_WINDOW: u32 = WM_USER + 5;
 pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
+pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
+pub(crate) const WM_GPUI_NATIVE_DRAG_ENDED: u32 = WM_USER + 11;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -77,6 +79,28 @@ impl Drop for DrawWindowGuard<'_> {
     }
 }
 
+fn mouse_button_from_wparam(wparam: WPARAM) -> Option<MouseButton> {
+    match MODIFIERKEYS_FLAGS(wparam.loword() as u32) {
+        flags if flags.contains(MK_LBUTTON) => Some(MouseButton::Left),
+        flags if flags.contains(MK_RBUTTON) => Some(MouseButton::Right),
+        flags if flags.contains(MK_MBUTTON) => Some(MouseButton::Middle),
+        flags if flags.contains(MK_XBUTTON1) => {
+            Some(MouseButton::Navigate(NavigationDirection::Back))
+        }
+        flags if flags.contains(MK_XBUTTON2) => {
+            Some(MouseButton::Navigate(NavigationDirection::Forward))
+        }
+        _ => None,
+    }
+}
+
+fn dispatch_input_to_window(window: &Rc<WindowsWindowInner>, input: PlatformInput) -> Option<bool> {
+    let mut callback = window.state.callbacks.input.take()?;
+    let handled = !callback(input).propagate;
+    window.state.callbacks.input.set(Some(callback));
+    Some(handled)
+}
+
 impl WindowsWindowInner {
     pub(crate) fn handle_msg(
         self: &Rc<Self>,
@@ -86,6 +110,29 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> LRESULT {
         let handled = match msg {
+            WM_GPUI_NATIVE_DRAG_ENDED => {
+                if wparam.0 == self.validation_number {
+                    // Detaching the OLE input queue resets key state. Reconcile
+                    // held modifiers before returning input to this window.
+                    let mut keyboard = [0_u8; 256];
+                    if unsafe { GetKeyboardState(&mut keyboard) }
+                        .log_err()
+                        .is_some()
+                    {
+                        for (key, state) in keyboard.iter_mut().enumerate() {
+                            let pressed = unsafe { GetAsyncKeyState(key as i32) } < 0;
+                            *state = (*state & 1) | if pressed { 0x80 } else { 0 };
+                        }
+                        unsafe { SetKeyboardState(&keyboard) }.log_err();
+                    }
+                    if let Some(mut callback) = self.state.callbacks.input.take() {
+                        callback(PlatformInput::FileDrop(FileDropEvent::Ended));
+                        self.state.callbacks.input.set(Some(callback));
+                    }
+                }
+                Some(0)
+            }
+
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
             // The GPUI event is dispatched in between, so a click handler runs while `active_window` is still
@@ -356,18 +403,7 @@ impl WindowsWindowInner {
         };
         let scale_factor = self.state.scale_factor.get();
 
-        let pressed_button = match MODIFIERKEYS_FLAGS(wparam.loword() as u32) {
-            flags if flags.contains(MK_LBUTTON) => Some(MouseButton::Left),
-            flags if flags.contains(MK_RBUTTON) => Some(MouseButton::Right),
-            flags if flags.contains(MK_MBUTTON) => Some(MouseButton::Middle),
-            flags if flags.contains(MK_XBUTTON1) => {
-                Some(MouseButton::Navigate(NavigationDirection::Back))
-            }
-            flags if flags.contains(MK_XBUTTON2) => {
-                Some(MouseButton::Navigate(NavigationDirection::Forward))
-            }
-            _ => None,
-        };
+        let pressed_button = mouse_button_from_wparam(wparam);
         let x = lparam.signed_loword() as f32;
         let y = lparam.signed_hiword() as f32;
         let input = PlatformInput::MouseMove(MouseMoveEvent {
@@ -497,7 +533,7 @@ impl WindowsWindowInner {
 
     fn handle_mouse_up_msg(
         &self,
-        _handle: HWND,
+        handle: HWND,
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
