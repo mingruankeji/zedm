@@ -2,6 +2,7 @@ mod client;
 mod clipboard;
 mod display;
 mod event;
+mod file_drag;
 mod window;
 mod xim_handler;
 

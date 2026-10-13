@@ -257,6 +257,8 @@ pub struct Callbacks {
 }
 
 pub struct X11WindowState {
+    pub destroyed: bool,
+    external_drag_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     parent: Option<X11WindowStatePtr>,
     children: FxHashSet<xproto::Window>,
     client: X11ClientStatePtr,
@@ -851,6 +853,8 @@ impl X11WindowState {
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
+                destroyed: false,
+                external_drag_cancel: None,
                 client_side_decorations_supported,
                 decorations: WindowDecorations::Server,
                 last_insets: [0, 0, 0, 0],
@@ -1161,6 +1165,9 @@ impl X11WindowStatePtr {
     }
 
     pub fn close(&self) {
+        if let Some(cancelled) = self.state.borrow_mut().external_drag_cancel.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
         let state = self.state.borrow();
         let client = state.client.clone();
         #[allow(clippy::mutable_key_type)]
@@ -1385,6 +1392,79 @@ impl X11WindowStatePtr {
 }
 
 impl PlatformWindow for X11Window {
+    fn can_start_external_drag(&self) -> bool {
+        true
+    }
+    fn start_external_drag(&self, payload: &gpui::ExternalDragPayload) -> bool {
+        let gpui::ExternalDragPayload::Files(paths) = payload else {
+            return false;
+        };
+        let paths = paths.clone();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(previous) = self
+            .0
+            .state
+            .borrow_mut()
+            .external_drag_cancel
+            .replace(cancelled.clone())
+        {
+            previous.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if self
+            .0
+            .xcb
+            .ungrab_pointer(x11rb::CURRENT_TIME)
+            .and_then(|cookie| {
+                drop(cookie);
+                self.0.xcb.flush()
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let source = self.0.x_window;
+        let completion_cancelled = cancelled.clone();
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        if std::thread::Builder::new()
+            .name("x11-file-drag".into())
+            .spawn(move || {
+                let result = super::file_drag::run(paths, source, cancelled);
+                if sender.send(result).is_err() {
+                    log::debug!("file drag source closed");
+                }
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let this = self.0.clone();
+        self.0
+            .state
+            .borrow()
+            .executor
+            .spawn(async move {
+                match receiver.await {
+                    Ok(Ok(())) => {}
+                    _ => log::warn!("native X11 file drag failed"),
+                }
+                if !this
+                    .state
+                    .borrow()
+                    .external_drag_cancel
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &completion_cancelled))
+                {
+                    return;
+                }
+                this.state.borrow_mut().external_drag_cancel.take();
+                this.handle_input(gpui::PlatformInput::FileDrop(
+                    gpui::FileDropEvent::Exited {},
+                ));
+            })
+            .detach();
+        true
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.state.borrow().bounds
     }
