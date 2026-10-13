@@ -1,0 +1,76 @@
+name: NyaTerm branch
+
+# Upstream's workflows do not run on this branch, and running them here would
+# not be useful anyway: this branch touches GPUI and the platform atlases only,
+# while upstream's CI builds the whole editor. This job is scoped to the crates
+# the patch series changes.
+#
+# Added as its own file so rebasing the series onto a newer upstream never
+# conflicts over CI configuration.
+#
+# rust-toolchain.toml pins the toolchain and declares its own components, so
+# rustup selects it automatically.
+
+on:
+  push:
+    branches: ["nyaterm"]
+  pull_request:
+    branches: ["nyaterm"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gpui:
+    name: gpui and the patched atlases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reuse the repository's own dependency script rather than a hand-kept
+      # package list, so a rebase picks up upstream's changes to it.
+      - name: Install system dependencies
+        run: ./script/linux
+
+      - name: Check gpui and the platform layer
+        run: cargo check -p gpui -p gpui_platform
+
+      # The property the stride-aware upload exists for: a dirty rectangle must
+      # not disturb the pixels around it. Getting this wrong corrupts the
+      # surrounding texture silently rather than failing.
+      - name: Dirty-region upload test
+        run: cargo test -p gpui strided_update_preserves_pixels_outside_the_dirty_rectangle
+
+      - name: Check the WGPU and Linux backends
+        run: cargo check -p gpui_wgpu -p gpui_linux
+
+  # The Metal and DirectX atlases carry the same stride-aware upload and cannot
+  # be compiled on Linux, so they are checked on their own platforms. Only
+  # `cargo check` here: this branch is about those two files compiling, not
+  # about running the editor's test suite on three operating systems.
+  platform-backends:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: metal atlas (macos)
+            os: macos-latest
+            args: -p gpui_apple -p gpui_macos
+          - name: directx atlas (windows)
+            os: windows-latest
+            args: -p gpui_windows
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check
+        run: cargo check ${{ matrix.args }}
+
+      - name: Native file promise delegate test
+        if: runner.os == 'macOS'
+        run: cargo test -p gpui_macos file_promise --lib
+
+      - name: Native Windows drag tests
+        if: runner.os == 'Windows'
+        run: cargo test -p gpui_windows --features test-support external_drag --lib
