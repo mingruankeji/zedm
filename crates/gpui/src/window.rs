@@ -8,7 +8,7 @@ use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
+    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, DynamicTexture, DynamicTextureId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
@@ -5164,6 +5164,97 @@ impl Window {
             opacity,
         });
         Ok(())
+    }
+
+    /// Allocates a mutable BGRA8 texture. `bytes_per_row` may include source padding.
+    pub fn create_dynamic_texture(
+        &mut self,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) -> Result<DynamicTexture> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT_DYNAMIC_TEXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+        let row_bytes = usize::try_from(size.width.0.max(0))?
+            .checked_mul(4)
+            .context("dynamic texture row size overflow")?;
+        let height = usize::try_from(size.height.0.max(0))?;
+        let source_stride = usize::try_from(bytes_per_row)?;
+        if row_bytes == 0 || height == 0 || source_stride < row_bytes {
+            return Err(anyhow!("invalid dynamic texture dimensions or stride"));
+        }
+        let required = (height - 1)
+            .checked_mul(source_stride)
+            .and_then(|offset| offset.checked_add(row_bytes))
+            .context("dynamic texture payload size overflow")?;
+        if bytes.len() != required {
+            return Err(anyhow!(
+                "dynamic texture payload length does not match its dimensions"
+            ));
+        }
+        let mut packed = Vec::with_capacity(row_bytes * height);
+        for row in 0..height {
+            packed.extend_from_slice(&bytes[row * source_stride..row * source_stride + row_bytes]);
+        }
+        let texture = DynamicTexture {
+            id: DynamicTextureId(NEXT_DYNAMIC_TEXTURE_ID.fetch_add(1, Ordering::Relaxed)),
+            size,
+        };
+        self.sprite_atlas
+            .get_or_insert_with(crate::AtlasKey::DynamicTexture(texture.id), &mut || {
+                Ok(Some((size, Cow::Owned(packed.clone()))))
+            })?
+            .context("failed to allocate dynamic texture")?;
+        Ok(texture)
+    }
+
+    /// Uploads a BGRA8 sub-region into a mutable texture.
+    pub fn update_dynamic_texture(
+        &mut self,
+        texture: DynamicTexture,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) -> Result<()> {
+        self.sprite_atlas.update(
+            &crate::AtlasKey::DynamicTexture(texture.id),
+            bounds,
+            bytes,
+            bytes_per_row,
+        )
+    }
+
+    /// Paints a mutable texture into the current scene.
+    pub fn paint_dynamic_texture(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: DynamicTexture,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+        let tile = self
+            .sprite_atlas
+            .get_or_insert_with(crate::AtlasKey::DynamicTexture(texture.id), &mut || {
+                Ok(None)
+            })?
+            .context("dynamic texture was removed")?;
+        self.next_frame.scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            bounds: self.snap_bounds(bounds),
+            content_mask: self.snapped_content_mask(),
+            corner_radii: Default::default(),
+            tile,
+            opacity: self.element_opacity(),
+        });
+        Ok(())
+    }
+
+    /// Removes a mutable texture from the atlas.
+    pub fn remove_dynamic_texture(&mut self, texture: DynamicTexture) {
+        self.sprite_atlas
+            .remove(&crate::AtlasKey::DynamicTexture(texture.id));
     }
 
     /// Paint a surface into the scene for the next frame at the current z-index.

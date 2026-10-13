@@ -32,6 +32,24 @@ impl AssetSource for () {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ImageId(pub usize);
 
+/// A mutable BGRA8 texture stored in the platform sprite atlas.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DynamicTexture {
+    pub(crate) id: DynamicTextureId,
+    pub(crate) size: Size<DevicePixels>,
+}
+
+impl DynamicTexture {
+    /// Texture dimensions in device pixels.
+    pub fn size(&self) -> Size<DevicePixels> {
+        self.size
+    }
+}
+
+/// Stable identity for a [`DynamicTexture`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DynamicTextureId(pub usize);
+
 #[derive(PartialEq, Eq, Hash, Clone)]
 #[expect(missing_docs)]
 pub struct RenderImageParams {

@@ -49,6 +49,27 @@ impl PlatformAtlas for MetalAtlas {
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
+
+    fn update(
+        &self,
+        key: &AtlasKey,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) -> Result<()> {
+        let lock = self.0.lock();
+        let tile = lock.tile(key).context("atlas tile was not found")?;
+        validate_update(tile, bounds, bytes, bytes_per_row)?;
+        let absolute = Bounds {
+            origin: tile.bounds.origin + bounds.origin,
+            size: bounds.size,
+        };
+        lock.backend
+            .texture(tile.texture_id)
+            .context("atlas tile refers to a missing texture")?
+            .upload_with_stride(absolute, bytes, bytes_per_row);
+        Ok(())
+    }
 }
 
 impl AtlasBackend for MetalAtlasTextures {
@@ -241,6 +262,21 @@ impl MetalAtlasTexture {
         );
     }
 
+    fn upload_with_stride(&self, bounds: Bounds<DevicePixels>, bytes: &[u8], bytes_per_row: u32) {
+        let region = metal::MTLRegion::new_2d(
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
+        self.metal_texture.replace_region(
+            region,
+            0,
+            bytes.as_ptr() as *const _,
+            u64::from(bytes_per_row),
+        );
+    }
+
     fn bytes_per_pixel(&self) -> u8 {
         use metal::MTLPixelFormat::*;
         match self.metal_texture.pixel_format() {
@@ -257,6 +293,47 @@ impl MetalAtlasTexture {
     fn is_unreferenced(&mut self) -> bool {
         self.live_atlas_keys == 0
     }
+}
+
+fn validate_update(
+    tile: AtlasTile,
+    bounds: Bounds<DevicePixels>,
+    bytes: &[u8],
+    bytes_per_row: u32,
+) -> Result<()> {
+    let width = u32::try_from(bounds.size.width.0).context("negative texture width")?;
+    let height = u32::try_from(bounds.size.height.0).context("negative texture height")?;
+    let right = bounds
+        .origin
+        .x
+        .0
+        .checked_add(bounds.size.width.0)
+        .context("texture bounds overflow")?;
+    let bottom = bounds
+        .origin
+        .y
+        .0
+        .checked_add(bounds.size.height.0)
+        .context("texture bounds overflow")?;
+    anyhow::ensure!(
+        bounds.origin.x.0 >= 0
+            && bounds.origin.y.0 >= 0
+            && right <= tile.bounds.size.width.0
+            && bottom <= tile.bounds.size.height.0
+            && width > 0
+            && height > 0
+            && bytes_per_row >= width * 4,
+        "dynamic texture update is outside the allocated tile"
+    );
+    let required = usize::try_from(height - 1)?
+        .checked_mul(bytes_per_row as usize)
+        .and_then(|offset| offset.checked_add(width as usize * 4))
+        .context("dynamic texture payload size overflow")?;
+    anyhow::ensure!(
+        bytes.len() == required,
+        "dynamic texture payload length mismatch"
+    );
+    Ok(())
 }
 
 fn size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {

@@ -26,6 +26,7 @@ struct PendingUpload {
     id: AtlasTextureId,
     bounds: Bounds<DevicePixels>,
     data: Vec<u8>,
+    bytes_per_row: u32,
 }
 
 struct WgpuAtlasTextures {
@@ -121,6 +122,25 @@ impl PlatformAtlas for WgpuAtlas {
 
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
+    }
+
+    fn update(
+        &self,
+        key: &AtlasKey,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) -> Result<()> {
+        let mut lock = self.0.lock();
+        let tile = lock.tile(key).context("atlas tile was not found")?;
+        validate_update(tile, bounds, bytes, bytes_per_row)?;
+        let absolute = Bounds {
+            origin: tile.bounds.origin + bounds.origin,
+            size: bounds.size,
+        };
+        lock.backend
+            .upload_texture_with_stride(tile.texture_id, absolute, bytes, bytes_per_row);
+        Ok(())
     }
 }
 
@@ -254,14 +274,34 @@ impl WgpuAtlasTextures {
     }
 
     fn upload_texture(&mut self, id: AtlasTextureId, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
+        let bytes_per_pixel = self
+            .storage
+            .get(id)
+            .map(WgpuAtlasTexture::bytes_per_pixel)
+            .unwrap_or(4);
+        let bytes_per_row = bounds.size.width.0 as u32 * bytes_per_pixel as u32;
+        self.upload_texture_with_stride(id, bounds, bytes, bytes_per_row);
+    }
+
+    fn upload_texture_with_stride(
+        &mut self,
+        id: AtlasTextureId,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) {
         let data = self
             .storage
             .get(id)
             .map(|texture| swizzle_upload_data(bytes, texture.format))
             .unwrap_or_else(|| bytes.to_vec());
 
-        self.pending_uploads
-            .push(PendingUpload { id, bounds, data });
+        self.pending_uploads.push(PendingUpload {
+            id,
+            bounds,
+            data,
+            bytes_per_row,
+        });
     }
 
     fn flush_uploads(&mut self) {
@@ -269,8 +309,6 @@ impl WgpuAtlasTextures {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;
             };
-            let bytes_per_pixel = texture.bytes_per_pixel();
-
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture.texture,
@@ -285,7 +323,7 @@ impl WgpuAtlasTextures {
                 &upload.data,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(upload.bounds.size.width.0 as u32 * bytes_per_pixel as u32),
+                    bytes_per_row: Some(upload.bytes_per_row),
                     rows_per_image: None,
                 },
                 wgpu::Extent3d {
@@ -296,6 +334,47 @@ impl WgpuAtlasTextures {
             );
         }
     }
+}
+
+fn validate_update(
+    tile: AtlasTile,
+    bounds: Bounds<DevicePixels>,
+    bytes: &[u8],
+    bytes_per_row: u32,
+) -> Result<()> {
+    let width = u32::try_from(bounds.size.width.0).context("negative texture width")?;
+    let height = u32::try_from(bounds.size.height.0).context("negative texture height")?;
+    let right = bounds
+        .origin
+        .x
+        .0
+        .checked_add(bounds.size.width.0)
+        .context("texture bounds overflow")?;
+    let bottom = bounds
+        .origin
+        .y
+        .0
+        .checked_add(bounds.size.height.0)
+        .context("texture bounds overflow")?;
+    anyhow::ensure!(
+        bounds.origin.x.0 >= 0
+            && bounds.origin.y.0 >= 0
+            && right <= tile.bounds.size.width.0
+            && bottom <= tile.bounds.size.height.0
+            && width > 0
+            && height > 0
+            && bytes_per_row >= width * 4,
+        "dynamic texture update is outside the allocated tile"
+    );
+    let required = usize::try_from(height - 1)?
+        .checked_mul(bytes_per_row as usize)
+        .and_then(|offset| offset.checked_add(width as usize * 4))
+        .context("dynamic texture payload size overflow")?;
+    anyhow::ensure!(
+        bytes.len() == required,
+        "dynamic texture payload length mismatch"
+    );
+    Ok(())
 }
 
 #[derive(Default)]
