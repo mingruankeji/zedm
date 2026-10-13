@@ -5,7 +5,7 @@ to GPUI on top of an unmodified upstream base.
 
 - Fork: <https://github.com/nyakang/zed>
 - Upstream: <https://github.com/zed-industries/zed>
-- Base revision: `f8c2cc844057540ca1eac7de4f19f50d7597dead` (upstream `main` on 2026-10-01)
+- Base revision: `26363aabdb31a0c016728634202e1ad5067033aa` (upstream `main`, 2026-10-13)
 - Branch: `nyaterm`
 - Crates touched: `gpui`, `gpui_apple`, `gpui_wgpu`, `gpui_windows`,
   `gpui_linux`, `gpui_macos`, and `gpui_web`. Nothing else in the workspace is
@@ -325,3 +325,64 @@ synchronous target releases without calling EndOperation. Validation: Windows
 export suite (13 passed); the one-shot observer test uses real COM EndOperation
 dispatch. Three-platform CI passed for preceding d24d377526, including the
 macOS promise delegate ABI test: run 37620647522. Final revision is rechecked.
+
+## 2026-10-13 upstream rebase
+
+Upstream `main` is fixed at `26363aabdb31a0c016728634202e1ad5067033aa`.
+Previous published NyaTerm head: `400d43cd62b6499c77a1400d6f83116d9845e187`.
+The previous branch is retained locally as `backup/nyaterm-20261013`.
+
+The effective old-base-to-fork tree (including merge-only resolutions) was
+reconstructed byte-for-byte as separate concern commits before rebasing.
+Old upstream merge history was flattened; no functional net change was discarded
+except the explicitly documented upstream replacements below. The concern
+commits and subsequent compatibility fixes remain separate.
+
+| Concern | Reconstructed commit on old base |
+| --- | --- |
+| review marker | `523976eda98b3e1d1696e85569627d8ada2a45b8` |
+| deferred file and directory contracts | `d16903cbe77c5fb1804511824e786f98fcccc87e` |
+| mutable atlas textures | `112f62400a11b9fcab78ecfc26ae0a960377952e` |
+| hidden cursor style | `e04b6595f4caf18ec789007e57f99d809cc1cc5c` |
+| Linux native file export | `e024a2007680106a5d1d813c99d8e387ca5c4b3d` |
+| macOS native file promises | `af445b011afb99913bd6df6d3033beaca36ebd36` |
+| Windows native file export | `2eb1f0f1fecf4d6957aeebabcf5d9dd71a26e1d3` |
+| cross-window internal drags | `52329da3ff97623cc0c30de145e32caeafd4e9d7` |
+| modal owner rollback | `9de264438cb763ab7e8f46dd65cbee5a0357ecd7` |
+| fork validation | `18c2aa08cd1b671a3aad026f9456a0b56ddbf578` |
+| fork documentation | `39a6bb8e147c1928c1cc732c265191499a2ff768` |
+
+Replay commits before this documentation update:
+
+- `97f32191db57b090ea41c458846b56148c129117` docs(fork): preserve review marker
+- `c8ba0d7c123213480e161c5ebb67324acf09a558` feat(fork): preserve deferred file and directory contracts
+- `eaed18ac230bcd3edc086a0c60b0bc5049206659` feat(fork): preserve mutable atlas textures
+- `53043f67c664609dd5fd30cd70443e679618098a` feat(fork): preserve hidden cursor style
+- `d269194d72419fb4572acffaaa66443b266d1453` feat(fork): preserve Linux native file export
+- `df878de2eeab2a3cc5415d63d387f323d096089a` feat(fork): preserve macOS native file promises
+- `5c3ddf9322f44c861304f100e1e3f8fd17473752` feat(fork): preserve Windows native file export
+- `d426f0f383462721b09a0272035a58dd7927d389` feat(fork): preserve cross-window internal drags
+- `fd47c978b98e8e0d53acd385f88a396bd347012c` feat(fork): preserve modal owner rollback
+- `748c0722a50db3004c15a5ffc50b78d0909fc418` ci(fork): preserve fork validation
+- `cae68287b853719ed505ee3366b1a67e95679c67` docs(fork): preserve fork documentation
+- `c2160fabe920c7c4e3206eee9b8f80a243e26a06` fix(gpui): adapt native drag patches to upstream platform changes
+- `5db7a2ddeb4cdec0a2f772b20d922b8385b8f7ef` style(gpui): order combined virtual-file exports
+
+Retained dynamic textures, hidden cursors, modal owner rollback, cross-window
+typed drags, deferred file/directory contracts, native Windows exports, AppKit
+file promises and Linux Xdnd export with the previous lifecycle limits.
+Upstream now assigns WM_USER+10 to display changes, so native-drag completion
+moves to WM_USER+11. Upstream DisplayId/TestDisplay imports stay present; obsolete
+end-session/X11 destroyed state is not resurrected. The only additional style
+change orders the combined GPUI public imports.
+
+Windows checks for GPUI, platform, Windows and WGPU passed; strided dirty-region
+upload (1), virtual contract suite (6), cross-window handoff (1), and native
+external drag suite (13) passed. Scoped fmt for all eight modified GPUI/platform
+packages passed. Branch CI retains native macOS promises and Linux backend checks.
+
+
+Validation is on Windows; native macOS/Linux checks are delegated to the
+branch workflow. Interactive GUI/file-drop and real-server authentication
+checks were not performed by this update. Their outcomes must not be inferred
+from scripted peers or compile checks.
