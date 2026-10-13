@@ -2086,6 +2086,9 @@ impl X11ClientState {
     }
 
     fn get_cursor_icon(&mut self, style: CursorStyle) -> Option<xproto::Cursor> {
+        if style == CursorStyle::Hidden {
+            return self.get_or_create_invisible_cursor();
+        }
         if let Some(cursor) = self.cursor_cache.get(&style) {
             return *cursor;
         }

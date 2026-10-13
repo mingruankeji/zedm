@@ -664,6 +664,7 @@ struct MacWindowState {
     blurred_view: Option<id>,
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
+    hidden_cursor: id,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
@@ -1090,6 +1091,19 @@ impl MacWindow {
             let native_view = NSView::initWithFrame_(native_view, NSView::bounds(content_view));
             assert!(!native_view.is_null());
 
+            // AppKit's global hide APIs are undone by mouse motion. A transparent
+            // NSCursor keeps hidden cursor styling scoped to this view's cursor rect.
+            let hidden_cursor: id = msg_send![class!(NSCursor), alloc];
+            let hidden_image: id = msg_send![class!(NSImage), alloc];
+            let hidden_image: id = msg_send![hidden_image, initWithSize: NSSize::new(1., 1.)];
+            let hidden_cursor: id = msg_send![
+                hidden_cursor,
+                initWithImage: hidden_image
+                hotSpot: NSPoint::new(0., 0.)
+            ];
+            let _: () = msg_send![hidden_image, release];
+            assert!(!hidden_cursor.is_null());
+
             let state = Arc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -1099,6 +1113,7 @@ impl MacWindow {
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 cursor_style: CursorStyle::Arrow,
+                hidden_cursor,
                 cursor_visible,
                 frame_source: None,
                 renderer: renderer::new_renderer(
@@ -1391,6 +1406,7 @@ impl Drop for MacWindow {
         drop(this.accesskit_adapter.take());
         this.renderer.destroy();
         let window = this.native_window;
+        let hidden_cursor = this.hidden_cursor;
         let sheet_parent = this.sheet_parent.take();
         this.frame_source.take();
         unsafe {
@@ -1406,6 +1422,7 @@ impl Drop for MacWindow {
                     if let Some(parent) = sheet_parent {
                         let _: () = msg_send![parent, endSheet: window];
                     }
+                    let _: () = msg_send![hidden_cursor, release];
                     window.close();
                     window.autorelease();
                 }
@@ -2528,9 +2545,12 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
         let _: () = msg_send![super(this, class!(NSView)), resetCursorRects];
 
         let window_state = get_window_state(this);
-        let cursor_style = window_state.lock().cursor_style;
+        let state = window_state.lock();
+        let cursor_style = state.cursor_style;
+        let hidden_cursor = state.hidden_cursor;
 
         let cursor: id = match cursor_style {
+            CursorStyle::Hidden => hidden_cursor,
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
             CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
             CursorStyle::Crosshair => msg_send![class!(NSCursor), crosshairCursor],

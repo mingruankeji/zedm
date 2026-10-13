@@ -91,6 +91,10 @@ pub(crate) fn windows_credentials_target_name(url: &str) -> String {
 }
 
 pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
+    if style == CursorStyle::Hidden {
+        return None;
+    }
+
     static ARROW: OnceLock<SafeCursor> = OnceLock::new();
     static IBEAM: OnceLock<SafeCursor> = OnceLock::new();
     static CROSS: OnceLock<SafeCursor> = OnceLock::new();
@@ -188,4 +192,17 @@ where
             .log_err();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::CursorStyle;
+
+    use super::load_cursor;
+
+    #[test]
+    fn hidden_cursor_uses_a_null_native_handle() {
+        assert!(load_cursor(CursorStyle::Hidden).is_none());
+        assert!(load_cursor(CursorStyle::Arrow).is_some());
+    }
 }

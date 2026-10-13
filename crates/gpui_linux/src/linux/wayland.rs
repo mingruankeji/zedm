@@ -17,6 +17,7 @@ use gpui::CursorStyle;
 
 pub(super) fn to_shape(style: CursorStyle) -> Shape {
     match style {
+        CursorStyle::Hidden => unreachable!("hidden cursors do not have a cursor-shape-v1 shape"),
         CursorStyle::Arrow => Shape::Default,
         CursorStyle::IBeam => Shape::Text,
         CursorStyle::Crosshair => Shape::Crosshair,

@@ -817,6 +817,30 @@ impl WaylandClientStatePtr {
 }
 
 impl WaylandClientState {
+    fn apply_cursor_style(&mut self, style: CursorStyle, serial: u32) {
+        let Some(wl_pointer) = self.wl_pointer.clone() else {
+            return;
+        };
+        if style == CursorStyle::Hidden {
+            wl_pointer.set_cursor(serial, None, 0, 0);
+            return;
+        }
+        if let Some(cursor_shape_device) = &self.cursor_shape_device {
+            cursor_shape_device.set_shape(serial, to_shape(style));
+            return;
+        }
+        let Some(focused_window) = self.mouse_focused_window.clone() else {
+            return;
+        };
+        let scale = focused_window.primary_output_scale();
+        self.cursor.set_icon(
+            &wl_pointer,
+            serial,
+            cursor_style_to_icon_names(style),
+            scale,
+        );
+    }
+
     fn hide_cursor_until_mouse_moves(&mut self) {
         if self.cursor_hidden_window.is_some() {
             return;

@@ -564,6 +564,7 @@ impl Platform for WebPlatform {
 
     fn set_cursor_style(&self, style: CursorStyle) {
         let css_cursor = match style {
+            CursorStyle::Hidden => "none",
             CursorStyle::Arrow => "default",
             CursorStyle::IBeam => "text",
             CursorStyle::Crosshair => "crosshair",
