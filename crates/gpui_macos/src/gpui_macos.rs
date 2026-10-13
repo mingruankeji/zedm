@@ -7,6 +7,7 @@
 mod display;
 mod display_link;
 mod events;
+mod file_promise;
 mod keyboard;
 mod pasteboard;
 mod system_notifications;

@@ -2250,6 +2250,10 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn supports_file_promise_drag(&self) -> bool {
+        true
+    }
+
     fn can_start_external_drag(&self) -> bool {
         true
     }
@@ -2257,9 +2261,26 @@ impl PlatformWindow for MacWindow {
     fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
         use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 
-        let ExternalDragPayload::Files(paths) = payload;
-        if paths.entries().is_empty() {
-            log::warn!("start_external_drag declined: no paths");
+        let entries: Vec<_> = match payload {
+            ExternalDragPayload::Files(paths) => paths
+                .entries()
+                .iter()
+                .map(|(path, directory)| (path.clone(), *directory, None))
+                .collect(),
+            ExternalDragPayload::PromisedFiles(files) => files
+                .files()
+                .iter()
+                .map(|file| {
+                    (
+                        PathBuf::from(&file.name),
+                        file.is_directory,
+                        Some(file.clone()),
+                    )
+                })
+                .collect(),
+            _ => return false,
+        };
+        if entries.is_empty() {
             return false;
         }
 
@@ -2293,7 +2314,7 @@ impl PlatformWindow for MacWindow {
                 NSSize::new(32., 32.),
             );
 
-            for (path, is_directory) in paths.entries() {
+            for (path, is_directory, promise) in &entries {
                 // Preserve non-UTF-8 paths
                 let Ok(path_bytes) = CString::new(path.as_os_str().as_bytes()) else {
                     log::warn!("start_external_drag skipped path containing an interior nul byte");
@@ -2307,7 +2328,14 @@ impl PlatformWindow for MacWindow {
                     None,
                 );
 
-                let pasteboard_writer = ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&*url);
+                let promise_provider = promise
+                    .as_ref()
+                    .map(|file| crate::file_promise::provider(file.clone()));
+                let pasteboard_writer = if let Some(provider) = &promise_provider {
+                    ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&**provider)
+                } else {
+                    ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&*url)
+                };
                 let item = NSDraggingItem::initWithPasteboardWriter(
                     NSDraggingItem::alloc(),
                     pasteboard_writer,
