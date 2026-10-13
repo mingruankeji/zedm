@@ -5634,6 +5634,7 @@ impl Window {
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
         let update_count_before = self.invalidator.update_count();
+        let internal_drag_was_active = cx.active_drag.is_some();
         // Track input modality for focus-visible styling and hover suppression.
         // Hover is suppressed during keyboard modality so that keyboard navigation
         // doesn't show hover highlights on the item under the mouse cursor.
@@ -5787,6 +5788,12 @@ impl Window {
         // is the last chance for drag listeners to see the pointer leave and reset their state.
         self.promote_external_drag_to_platform(&event, cx);
 
+        let internal_drag_is_active = cx.active_drag.is_some();
+        if internal_drag_is_active != internal_drag_was_active {
+            self.platform_window
+                .set_internal_drag_active(internal_drag_is_active);
+        }
+
         let caused_invalidation = self.invalidator.update_count() > update_count_before;
         if caused_invalidation {
             self.input_rate_tracker.borrow_mut().record_input();
@@ -5798,6 +5805,16 @@ impl Window {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
         }
+    }
+
+    /// Whether this window supports writing file promises after a native drop.
+    pub fn supports_file_promise_drag(&self) -> bool {
+        self.platform_window.supports_file_promise_drag()
+    }
+
+    /// Whether this window supports deferred native file content.
+    pub fn supports_virtual_file_drag(&self) -> bool {
+        self.platform_window.supports_virtual_file_drag()
     }
 
     fn promote_external_drag_to_platform(&mut self, event: &PlatformInput, cx: &mut App) {
@@ -7922,8 +7939,8 @@ mod tests {
         AnyWindowHandle, AppContext as _, Bounds, ContentMask, Context, DispatchPhase,
         DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent,
         FocusHandle, InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent,
-        Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-        Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
+        Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        ParentElement, Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
         TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
         canvas, div, hsla, point, px, size,
@@ -8834,6 +8851,95 @@ mod tests {
                     move |path: &PathBuf, _, _| observed_drops.borrow_mut().push(path.clone())
                 })
         }
+    }
+
+    struct TypedDragSource;
+
+    impl Render for TypedDragSource {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("typed-drag-source")
+                .size_full()
+                .on_drag("typed-payload".to_string(), |_, _, _, cx| cx.new(|_| Empty))
+        }
+    }
+
+    struct TypedDropTarget(Rc<RefCell<Vec<String>>>);
+
+    impl Render for TypedDropTarget {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().on_drop({
+                let drops = self.0.clone();
+                move |payload: &String, _, _| drops.borrow_mut().push(payload.clone())
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn typed_drag_can_be_handed_to_another_window(cx: &mut TestAppContext) {
+        let source: AnyWindowHandle = cx.add_window(|_, _| TypedDragSource).into();
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let target: AnyWindowHandle = cx
+            .add_window({
+                let drops = drops.clone();
+                move |_, _| TypedDropTarget(drops)
+            })
+            .into();
+
+        cx.update_window(target, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        cx.update_window(source, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(10.), px(10.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: point(px(20.), px(20.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.active_drag.is_some());
+        })
+        .unwrap();
+
+        cx.update_window(target, |_, window, cx| {
+            let position = point(px(20.), px(20.));
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseUpEvent {
+                    position,
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.active_drag.is_none());
+        })
+        .unwrap();
+
+        assert_eq!(drops.borrow().as_slice(), ["typed-payload"]);
     }
 
     #[gpui::test]

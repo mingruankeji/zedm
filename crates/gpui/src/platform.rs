@@ -1260,6 +1260,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
+    /// Tells the platform whether GPUI currently owns an in-process typed drag.
+    /// Windows uses this to route captured pointer events across application windows.
+    fn set_internal_drag_active(&self, _active: bool) {}
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     /// Registers the callback invoked when [`Self::visibility`] changes. Only
     /// transitions are reported; the callback runs on the main thread outside
@@ -1327,6 +1330,16 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn request_decorations(&self, _decorations: WindowDecorations) {}
     fn show_window_menu(&self, _position: Point<Pixels>) {}
     fn start_window_move(&self) {}
+    /// Whether deferred virtual regular-file exports are implemented.
+    /// Whether the native receiver can supply a destination for promised files.
+    fn supports_file_promise_drag(&self) -> bool {
+        false
+    }
+
+    fn supports_virtual_file_drag(&self) -> bool {
+        false
+    }
+
     fn can_start_external_drag(&self) -> bool {
         false
     }
@@ -1752,6 +1765,13 @@ pub trait PlatformAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
+    fn update(
+        &self,
+        key: &AtlasKey,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) -> Result<()>;
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
@@ -1787,6 +1807,10 @@ impl<Backend> AtlasState<Backend> {
 
     pub fn contains(&self, key: &AtlasKey) -> bool {
         self.tiles_by_key.contains_key(key)
+    }
+
+    pub fn tile(&self, key: &AtlasKey) -> Option<AtlasTile> {
+        self.tiles_by_key.get(key).copied()
     }
 
     pub fn clear(&mut self, reset_backend: impl FnOnce(&mut Backend)) {
@@ -1881,6 +1905,24 @@ impl PlatformAtlas for HeadlessAtlas {
 
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
+    }
+
+    fn update(
+        &self,
+        key: &AtlasKey,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        bytes_per_row: u32,
+    ) -> Result<()> {
+        anyhow::ensure!(self.0.lock().contains(key), "atlas tile was not found");
+        anyhow::ensure!(
+            bounds.size.width.0 > 0
+                && bounds.size.height.0 > 0
+                && bytes_per_row >= bounds.size.width.0 as u32 * 4
+                && !bytes.is_empty(),
+            "invalid dynamic texture update"
+        );
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]

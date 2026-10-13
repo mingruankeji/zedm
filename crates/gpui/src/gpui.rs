@@ -23,6 +23,7 @@ mod elements;
 mod executor;
 mod platform_scheduler;
 pub(crate) use platform_scheduler::PlatformScheduler;
+mod file_promise;
 mod geometry;
 mod gestures;
 mod global;
@@ -67,6 +68,9 @@ pub mod test;
 mod text_system;
 mod util;
 mod view;
+mod virtual_file;
+#[cfg(test)]
+mod virtual_file_tests;
 mod window;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -185,6 +189,7 @@ macro_rules! bench_main {
         $crate::bench_main!(allocator = ::std::alloc::System; $($groups)*);
     };
 }
+pub use file_promise::{PromisedFileDescriptor, PromisedFileDragPayload, PromisedFileProvider};
 pub use gpui_shared_string::*;
 pub use gpui_util::arc_cow::ArcCow;
 pub use http_client;
@@ -225,6 +230,11 @@ pub use test::*;
 pub use text_system::*;
 pub use util::{FutureExt, Timeout};
 pub use view::*;
+pub use virtual_file::{
+    NativeFileDragEvent, NativeFileDragObserver, NativeFileDragOutcome,
+    DeferredVirtualFileDragPayload, VIRTUAL_FILE_CHUNK_SIZE, VirtualFileDescriptor,
+    VirtualFileDragPayload, VirtualFileProvider, VirtualFileStream, VirtualFileTreeProvider,
+};
 pub use window::*;
 
 #[cfg(not(target_family = "wasm"))]

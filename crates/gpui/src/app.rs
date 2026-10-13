@@ -2980,6 +2980,7 @@ impl App {
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
         if self.active_drag.is_some() {
             self.active_drag = None;
+            window.platform_window.set_internal_drag_active(false);
             if self.platform_owned_drag.as_ref().is_some_and(|drag| {
                 drag.source_window == window.window_handle().window_id()
                     && matches!(&drag.state, PlatformOwnedDragState::RestoredInSourceWindow)

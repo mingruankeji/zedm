@@ -631,7 +631,19 @@ impl Interactivity {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
             external_payload: None,
+            can_start: None,
         });
+    }
+
+    /// Restrict drag initiation while preserving ordinary mouse selection gestures.
+    /// Call after `on_drag`; evaluated against the original mouse-down event.
+    pub fn can_drag(
+        &mut self,
+        predicate: impl Fn(&MouseDownEvent, &mut Window, &mut App) -> bool + 'static,
+    ) {
+        if let Some(listener) = self.drag_listener.as_mut() {
+            listener.can_start = Some(Box::new(predicate));
+        }
     }
 
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
@@ -1631,6 +1643,18 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Restrict a previously registered drag using the original mouse-down event.
+    fn can_drag(
+        mut self,
+        predicate: impl Fn(&MouseDownEvent, &mut Window, &mut App) -> bool + 'static,
+    ) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().can_drag(predicate);
+        self
+    }
+
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
     /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
     /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
@@ -1763,6 +1787,7 @@ pub(crate) struct DragListener {
     value: Arc<dyn Any>,
     render: Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
     external_payload: Option<ExternalDragPayloadResolver>,
+    can_start: Option<Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) -> bool>>,
 }
 
 type ExternalDragPayloadResolver =
@@ -2980,6 +3005,12 @@ impl Interactivity {
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
                             && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
+                            && drag_listener.as_ref().is_some_and(|listener| {
+                                listener
+                                    .can_start
+                                    .as_ref()
+                                    .is_none_or(|predicate| predicate(&mouse_down, window, cx))
+                            })
                             && let Some(listener) = drag_listener.take()
                             && mouse_down.button == MouseButton::Left
                         {
