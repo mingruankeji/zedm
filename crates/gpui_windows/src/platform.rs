@@ -100,6 +100,7 @@ pub(crate) struct WindowsPlatformState {
     /// Shared with every window so captured pointer messages are only handed
     /// across HWNDs while GPUI owns a typed in-process drag.
     pub(crate) internal_drag_active: Rc<Cell<bool>>,
+    pub(crate) pointer_capture_generation: Rc<Cell<usize>>,
     directx_devices: RefCell<Option<DirectXDevices>>,
 }
 
@@ -130,6 +131,7 @@ impl WindowsPlatformState {
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
             internal_drag_active: Rc::new(Cell::new(false)),
+            pointer_capture_generation: Rc::new(Cell::new(0)),
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
         }
@@ -320,6 +322,7 @@ impl WindowsPlatform {
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
             internal_drag_active: self.inner.state.internal_drag_active.clone(),
+            pointer_capture_generation: self.inner.state.pointer_capture_generation.clone(),
         }
     }
 
@@ -1440,6 +1443,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     /// Shared with [`WindowsPlatformState::internal_drag_active`] and every other window.
     pub(crate) internal_drag_active: Rc<Cell<bool>>,
+    pub(crate) pointer_capture_generation: Rc<Cell<usize>>,
 }
 
 struct PlatformWindowCreateContext {

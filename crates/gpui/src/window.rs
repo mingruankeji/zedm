@@ -5754,6 +5754,11 @@ impl Window {
                 PlatformInput::MouseMove(mouse_move)
             }
             PlatformInput::MouseDown(mouse_down) => {
+                // A new press cannot continue a gesture whose capture ended in
+                // another window before its deferred cancellation was delivered.
+                if cx.has_internal_drag() && cx.stop_active_drag(self) {
+                    cx.refresh_windows();
+                }
                 self.mouse_position = mouse_down.position;
                 self.modifiers = mouse_down.modifiers;
                 PlatformInput::MouseDown(mouse_down)
@@ -5769,6 +5774,15 @@ impl Window {
             PlatformInput::MouseExited(mouse_exited) => {
                 self.modifiers = mouse_exited.modifiers;
                 PlatformInput::MouseExited(mouse_exited)
+            }
+            PlatformInput::PointerCancelled(cancelled) => {
+                if cx.stop_active_drag(self) {
+                    cx.refresh_windows();
+                }
+                self.captured_hitbox = None;
+                self.long_press_capture = None;
+                self.refresh();
+                PlatformInput::PointerCancelled(cancelled)
             }
             PlatformInput::ModifiersChanged(modifiers_changed) => {
                 self.modifiers = modifiers_changed.modifiers;
@@ -8031,10 +8045,10 @@ mod tests {
         DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent,
         FocusHandle, InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent,
         Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        ParentElement, Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
-        StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
-        TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
-        canvas, div, hsla, point, px, size,
+        ParentElement, Pixels, PlatformInput, Point, PointerCancelEvent, PointerCancelReason,
+        Render, RequestFrameOptions, ScaledPixels, StatefulInteractiveElement as _, Styled,
+        TestAppContext, TouchDragEvent, TouchEvent, TouchId, TouchPhase, Underline, UnderlineStyle,
+        Window, WindowAppearance, WindowOptions, canvas, div, hsla, point, px, size,
     };
 
     #[gpui::test]
@@ -8946,6 +8960,113 @@ mod tests {
 
     struct TypedDragSource;
 
+    struct PointerCancelView {
+        drops: Rc<Cell<usize>>,
+        clicks: Rc<Cell<usize>>,
+        cancellations: Rc<Cell<usize>>,
+    }
+
+    impl Render for PointerCancelView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let drops = self.drops.clone();
+            let clicks = self.clicks.clone();
+            let cancellations = self.cancellations.clone();
+            div()
+                .id("pointer-cancel-view")
+                .size_full()
+                .on_drag(1_u32, |_, _, _, cx| cx.new(|_| Empty))
+                .on_drop(move |_: &u32, _, _| drops.set(drops.get() + 1))
+                .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                .child(canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _| {
+                        let cancellations = cancellations.clone();
+                        window.on_mouse_event(move |_: &PointerCancelEvent, phase, window, cx| {
+                            if phase.capture() {
+                                assert!(!cx.has_active_drag());
+                                assert!(window.captured_hitbox().is_none());
+                                cancellations.set(cancellations.get() + 1);
+                            }
+                        });
+                    },
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn pointer_cancel_clears_capture_pending_clicks_and_drag_without_dropping(
+        cx: &mut TestAppContext,
+    ) {
+        for reason in [
+            PointerCancelReason::CaptureLost,
+            PointerCancelReason::CancelMode,
+        ] {
+            for start_drag in [false, true] {
+                let drops = Rc::new(Cell::new(0));
+                let clicks = Rc::new(Cell::new(0));
+                let cancellations = Rc::new(Cell::new(0));
+                let window = cx.add_window({
+                    let drops = drops.clone();
+                    let clicks = clicks.clone();
+                    let cancellations = cancellations.clone();
+                    move |_, _| PointerCancelView {
+                        drops,
+                        clicks,
+                        cancellations,
+                    }
+                });
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    let down = MouseDownEvent {
+                        position: point(px(10.), px(10.)),
+                        button: MouseButton::Left,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    };
+                    let motion = MouseMoveEvent {
+                        position: point(px(20.), px(20.)),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Default::default(),
+                    };
+                    window.dispatch_event(down.clone().to_platform_input(), cx);
+                    if start_drag {
+                        window.dispatch_event(motion.clone().to_platform_input(), cx);
+                        assert!(cx.has_active_drag());
+                    }
+                    window.captured_hitbox = Some(
+                        window
+                            .rendered_frame
+                            .hitboxes
+                            .first()
+                            .expect("view hitbox")
+                            .id,
+                    );
+                    window.dispatch_event(PointerCancelEvent { reason }.to_platform_input(), cx);
+                    assert_eq!(cancellations.get(), 1);
+                    window.draw(cx).clear(cx);
+                    window.dispatch_event(motion.clone().to_platform_input(), cx);
+                    assert!(!cx.has_active_drag());
+                    let up = MouseUpEvent {
+                        position: motion.position,
+                        button: MouseButton::Left,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                    };
+                    window.dispatch_event(up.clone().to_platform_input(), cx);
+                    assert_eq!(drops.get(), 0);
+                    assert_eq!(clicks.get(), 0);
+                    window.dispatch_event(down.to_platform_input(), cx);
+                    window.dispatch_event(motion.to_platform_input(), cx);
+                    assert!(cx.has_active_drag());
+                    window.dispatch_event(up.to_platform_input(), cx);
+                    assert_eq!(drops.get(), 1);
+                })
+                .expect("cancel test window");
+            }
+        }
+    }
+
     impl Render for TypedDragSource {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
@@ -9081,6 +9202,7 @@ mod tests {
                     cx,
                 );
                 assert!(cx.active_drag.is_some());
+                assert!(cx.has_internal_drag());
             });
             assert!(
                 update_result.is_ok(),
@@ -9211,6 +9333,7 @@ mod tests {
                 .to_platform_input(),
                 cx,
             );
+            assert!(!cx.has_internal_drag());
             assert!(
                 cx.active_drag
                     .as_ref()

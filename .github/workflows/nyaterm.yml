@@ -74,3 +74,15 @@ jobs:
       - name: Native Windows drag tests
         if: runner.os == 'Windows'
         run: cargo test -p gpui_windows --features test-support external_drag --lib
+
+      - name: Safe Windows internal drag targets
+        if: runner.os == 'Windows'
+        run: cargo test -p gpui_windows --features test-support internal_drag --lib
+
+      - name: Windows pointer cancellation
+        if: runner.os == 'Windows'
+        run: cargo test -p gpui_windows --features test-support pointer_cancel --lib
+
+      - name: GPUI drag lifecycle tests
+        if: runner.os == 'Windows'
+        run: cargo test -p gpui drag --lib

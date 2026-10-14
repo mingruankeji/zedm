@@ -2971,6 +2971,15 @@ impl App {
         self.active_drag.is_some()
     }
 
+    /// Whether a drag is controlled by GPUI rather than native file drag/drop.
+    pub fn has_internal_drag(&self) -> bool {
+        self.platform_owned_drag.is_none()
+            && self
+                .active_drag
+                .as_ref()
+                .is_some_and(|drag| !drag.value.as_ref().is::<crate::ExternalPaths>())
+    }
+
     /// Gets the cursor style of the currently active drag operation.
     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)

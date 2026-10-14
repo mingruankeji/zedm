@@ -29,6 +29,98 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_DISPLAYS_CHANGED: u32 = WM_USER + 10;
 pub(crate) const WM_GPUI_NATIVE_DRAG_ENDED: u32 = WM_USER + 11;
+pub(crate) const WM_GPUI_POINTER_CANCELLED: u32 = WM_USER + 12;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CaptureReleaseReason {
+    MouseUp,
+    NativeDrag,
+    Cancelled,
+}
+
+#[derive(Default)]
+pub(crate) struct PointerCaptureState {
+    generation: Rc<Cell<usize>>,
+    own_generation: Cell<usize>,
+    active: Cell<bool>,
+    release_reason: Cell<Option<CaptureReleaseReason>>,
+    pending_cancel: Cell<Option<(usize, PointerCancelReason)>>,
+}
+
+impl PointerCaptureState {
+    pub(crate) fn new(generation: Rc<Cell<usize>>) -> Self {
+        Self {
+            generation,
+            ..Self::default()
+        }
+    }
+
+    fn begin(&self) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.own_generation.set(self.generation.get());
+        self.pending_cancel.set(None);
+        self.active.set(true);
+    }
+
+    fn release(&self, reason: CaptureReleaseReason) -> CaptureReleaseGuard<'_> {
+        if reason != CaptureReleaseReason::Cancelled {
+            self.active.set(false);
+            self.pending_cancel.set(None);
+        }
+        CaptureReleaseGuard {
+            previous: self.release_reason.replace(Some(reason)),
+            state: self,
+        }
+    }
+
+    fn queue_cancel(&self, reason: PointerCancelReason) -> Option<usize> {
+        if !self.active.get()
+            || self.own_generation.get() != self.generation.get()
+            || self.release_reason.get().is_some()
+            || self.pending_cancel.get().is_some()
+        {
+            return None;
+        }
+        let generation = self.generation.get();
+        self.pending_cancel.set(Some((generation, reason)));
+        Some(generation)
+    }
+
+    fn take_cancel(&self, generation: usize) -> Option<PointerCancelReason> {
+        let (pending_generation, reason) = self.pending_cancel.get()?;
+        if !self.active.get()
+            || self.own_generation.get() != generation
+            || self.generation.get() != generation
+            || pending_generation != generation
+        {
+            return None;
+        }
+        self.pending_cancel.set(None);
+        self.active.set(false);
+        Some(reason)
+    }
+
+    fn has_pending_cancel(&self, generation: usize) -> bool {
+        self.active.get()
+            && self.own_generation.get() == generation
+            && self.generation.get() == generation
+            && self
+                .pending_cancel
+                .get()
+                .is_some_and(|(pending, _)| pending == generation)
+    }
+}
+
+struct CaptureReleaseGuard<'a> {
+    state: &'a PointerCaptureState,
+    previous: Option<CaptureReleaseReason>,
+}
+
+impl Drop for CaptureReleaseGuard<'_> {
+    fn drop(&mut self) {
+        self.state.release_reason.set(self.previous);
+    }
+}
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -109,6 +201,21 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> LRESULT {
         let handled = match msg {
+            WM_GPUI_POINTER_CANCELLED => {
+                self.handle_pointer_cancelled_msg(wparam, lparam);
+                Some(0)
+            }
+            WM_CAPTURECHANGED => {
+                if lparam.0 != handle.0 as isize {
+                    self.queue_pointer_cancel(PointerCancelReason::CaptureLost);
+                }
+                Some(0)
+            }
+            WM_CANCELMODE => {
+                self.queue_pointer_cancel(PointerCancelReason::CancelMode);
+                self.release_pointer_capture(CaptureReleaseReason::Cancelled);
+                None
+            }
             WM_GPUI_NATIVE_DRAG_ENDED => {
                 if wparam.0 == self.validation_number {
                     // Detaching the OLE input queue resets key state. Reconcile
@@ -519,6 +626,7 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
+        self.state.pointer_capture.begin();
         unsafe { SetCapture(handle) };
 
         let Some(mut func) = self.state.callbacks.input.take() else {
@@ -549,7 +657,7 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
-        unsafe { ReleaseCapture().log_err() };
+        self.release_pointer_capture(CaptureReleaseReason::MouseUp);
 
         if let Some((target, _, position)) = self.internal_drag_target(handle, lparam) {
             let modifiers = current_modifiers();
@@ -632,6 +740,53 @@ impl WindowsWindowInner {
             target.state.scale_factor.get(),
         );
         Some((target, target_handle, position))
+    }
+
+    pub(crate) fn release_pointer_capture(&self, reason: CaptureReleaseReason) {
+        let _guard = self.state.pointer_capture.release(reason);
+        if unsafe { GetCapture() } == self.get_raw_handle() {
+            unsafe { ReleaseCapture() }.log_err();
+        }
+    }
+
+    fn queue_pointer_cancel(&self, reason: PointerCancelReason) {
+        if let Some(generation) = self.state.pointer_capture.queue_cancel(reason) {
+            self.post_pointer_cancel(generation);
+        }
+    }
+
+    fn post_pointer_cancel(&self, generation: usize) {
+        // Capture changes may re-enter while GPUI's AppCell is borrowed. The
+        // generation also prevents a queued cancellation from ending a new drag.
+        unsafe {
+            PostMessageW(
+                Some(self.get_raw_handle()),
+                WM_GPUI_POINTER_CANCELLED,
+                WPARAM(self.validation_number),
+                LPARAM(generation as isize),
+            )
+        }
+        .log_err();
+    }
+
+    fn handle_pointer_cancelled_msg(&self, wparam: WPARAM, lparam: LPARAM) {
+        if wparam.0 != self.validation_number {
+            return;
+        }
+        let generation = lparam.0 as usize;
+        if !self.state.pointer_capture.has_pending_cancel(generation) {
+            return;
+        }
+        let Some(mut callback) = self.state.callbacks.input.take() else {
+            self.post_pointer_cancel(generation);
+            return;
+        };
+        if let Some(reason) = self.state.pointer_capture.take_cancel(generation) {
+            callback(PlatformInput::PointerCancelled(PointerCancelEvent {
+                reason,
+            }));
+        }
+        self.state.callbacks.input.set(Some(callback));
     }
 
     fn handle_xbutton_msg(
@@ -1930,5 +2085,129 @@ fn notify_frame_changed(handle: HWND) {
                 | SWP_NOZORDER,
         )
         .log_err();
+    }
+}
+
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::{CaptureReleaseReason, PointerCaptureState};
+    use gpui::PointerCancelReason;
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn pointer_cancel_from_another_window_cannot_end_the_new_capture() {
+        let generation = Rc::new(Cell::new(0));
+        let source = PointerCaptureState::new(generation.clone());
+        let target = PointerCaptureState::new(generation);
+        source.begin();
+        let old = source
+            .queue_cancel(PointerCancelReason::CaptureLost)
+            .expect("source capture");
+        target.begin();
+        assert!(source.take_cancel(old).is_none());
+        assert!(
+            source
+                .queue_cancel(PointerCancelReason::CaptureLost)
+                .is_none()
+        );
+        let new = target
+            .queue_cancel(PointerCancelReason::CancelMode)
+            .expect("target capture");
+        assert_eq!(
+            target.take_cancel(new),
+            Some(PointerCancelReason::CancelMode)
+        );
+    }
+
+    #[test]
+    fn pointer_cancel_capture_loss_is_delivered_once() {
+        let capture = PointerCaptureState::default();
+        capture.begin();
+        let generation = capture
+            .queue_cancel(PointerCancelReason::CaptureLost)
+            .expect("active capture");
+        assert!(
+            capture
+                .queue_cancel(PointerCancelReason::CancelMode)
+                .is_none()
+        );
+        assert_eq!(
+            capture.take_cancel(generation),
+            Some(PointerCancelReason::CaptureLost)
+        );
+        assert!(capture.take_cancel(generation).is_none());
+    }
+
+    #[test]
+    fn pointer_cancel_normal_release_and_native_handoff_do_not_cancel() {
+        for reason in [
+            CaptureReleaseReason::MouseUp,
+            CaptureReleaseReason::NativeDrag,
+        ] {
+            let capture = PointerCaptureState::default();
+            capture.begin();
+            let generation = capture
+                .queue_cancel(PointerCancelReason::CaptureLost)
+                .expect("active capture");
+            {
+                let _guard = capture.release(reason);
+                assert!(
+                    capture
+                        .queue_cancel(PointerCancelReason::CaptureLost)
+                        .is_none()
+                );
+            }
+            assert!(capture.take_cancel(generation).is_none());
+            assert!(
+                capture
+                    .queue_cancel(PointerCancelReason::CancelMode)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_cancel_old_message_cannot_cancel_a_new_gesture() {
+        let capture = PointerCaptureState::default();
+        capture.begin();
+        let old = capture
+            .queue_cancel(PointerCancelReason::CaptureLost)
+            .expect("first capture");
+        capture.begin();
+        let new = capture
+            .queue_cancel(PointerCancelReason::CancelMode)
+            .expect("second capture");
+        assert!(capture.take_cancel(old).is_none());
+        assert_eq!(
+            capture.take_cancel(new),
+            Some(PointerCancelReason::CancelMode)
+        );
+    }
+
+    #[test]
+    fn pointer_cancel_explicit_cancel_mode_preserves_queued_notification() {
+        let capture = PointerCaptureState::default();
+        capture.begin();
+        let generation = capture
+            .queue_cancel(PointerCancelReason::CancelMode)
+            .expect("active capture");
+        {
+            let _guard = capture.release(CaptureReleaseReason::Cancelled);
+            assert!(
+                capture
+                    .queue_cancel(PointerCancelReason::CaptureLost)
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            capture.take_cancel(generation),
+            Some(PointerCancelReason::CancelMode)
+        );
+        capture.begin();
+        assert!(
+            capture
+                .queue_cancel(PointerCancelReason::CaptureLost)
+                .is_some()
+        );
     }
 }

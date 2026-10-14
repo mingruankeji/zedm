@@ -689,6 +689,30 @@ impl Deref for MouseExitEvent {
     }
 }
 
+/// Why the platform cancelled a pointer gesture without releasing its button.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerCancelReason {
+    /// Another native window took mouse capture.
+    CaptureLost,
+    /// The operating system cancelled the window's modal interaction.
+    CancelMode,
+}
+
+/// Cancels pointer state without generating a click or accepting a drop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PointerCancelEvent {
+    /// The platform's reason for cancellation.
+    pub reason: PointerCancelReason,
+}
+
+impl Sealed for PointerCancelEvent {}
+impl InputEvent for PointerCancelEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::PointerCancelled(self)
+    }
+}
+impl MouseEvent for PointerCancelEvent {}
+
 /// A collection of paths from the platform, such as from a file drop.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct ExternalPaths(pub SmallVec<[PathBuf; 2]>);
@@ -791,6 +815,8 @@ pub enum PlatformInput {
     MouseMove(MouseMoveEvent),
     /// The mouse exited the window.
     MouseExited(MouseExitEvent),
+    /// The pointer gesture was cancelled without a mouse-up or drop.
+    PointerCancelled(PointerCancelEvent),
     /// The scroll wheel was used.
     ScrollWheel(ScrollWheelEvent),
     /// A pinch gesture was performed.
@@ -816,6 +842,7 @@ impl PlatformInput {
             PlatformInput::MouseMove(event) => Some(event),
             PlatformInput::MousePressure(event) => Some(event),
             PlatformInput::MouseExited(event) => Some(event),
+            PlatformInput::PointerCancelled(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
             PlatformInput::LongPress(event) => Some(event),
@@ -835,6 +862,7 @@ impl PlatformInput {
             PlatformInput::MouseMove(_) => None,
             PlatformInput::MousePressure(_) => None,
             PlatformInput::MouseExited(_) => None,
+            PlatformInput::PointerCancelled(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::Pinch(_) => None,
             PlatformInput::LongPress(_) => None,
@@ -856,6 +884,7 @@ impl PlatformInput {
             PlatformInput::MousePressure(_) => "mouse_pressure",
             PlatformInput::MouseMove(_) => "mouse_move",
             PlatformInput::MouseExited(_) => "mouse_exited",
+            PlatformInput::PointerCancelled(_) => "pointer_cancelled",
             PlatformInput::ScrollWheel(_) => "scroll_wheel",
             PlatformInput::Pinch(_) => "pinch",
             PlatformInput::LongPress(_) => "long_press",

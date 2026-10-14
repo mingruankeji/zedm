@@ -399,6 +399,31 @@ external drag suite (13) passed. Scoped fmt for all eight modified GPUI/platform
 packages passed. Branch CI retains native macOS promises and Linux backend checks.
 
 
+## 2026-10-14 interrupted pointer gestures
+
+Add `PointerCancelEvent`, `PointerCancelReason::{CaptureLost, CancelMode}` and
+`PlatformInput::PointerCancelled` to the window input listeners. Cancellation
+clears GPUI's drag, preview, hitbox capture and pending element clicks before
+notifying application listeners, without synthesizing mouse-up or accepting a
+drop. `App::has_internal_drag()` excludes native file drag ownership so consumers
+can handle Esc without interfering with OLE export.
+
+Windows classifies capture release as normal mouse-up, native drag handoff or
+explicit cancellation. Unexpected WM_CAPTURECHANGED/WM_CANCELMODE notifications
+are posted after the native callback with a window validation value and a gesture
+generation shared by the platform's windows. Duplicates and old notifications
+cannot cancel a later gesture, including one started in another window. A new
+mouse press clears the previous internal drag if its deferred cancellation has
+not yet arrived. WM_CANCELMODE still reaches DefWindowProc for native cleanup.
+
+Windows validation: GPUI drag lifecycle suite (9 passed), native pointer
+cancellation state tests (5 passed), and gpui_windows/gpui_platform check passed.
+The full Windows native suite passed 42 tests (one subprocess fixture ignored
+by the harness and exercised by its parent); scoped gpui/gpui_windows fmt passed.
+Branch CI now covers safe HWND queries, cancellation and GPUI drag lifecycle
+alongside the existing native file export suite. Interactive external application
+dragging, mixed DPI and live remote exports remain pending manual verification.
+
 Validation is on Windows; native macOS/Linux checks are delegated to the
 branch workflow. Interactive GUI/file-drop and real-server authentication
 checks were not performed by this update. Their outcomes must not be inferred
