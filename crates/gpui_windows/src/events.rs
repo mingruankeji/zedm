@@ -657,6 +657,16 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
+        // A button-up already in the native queue must not accept a drop after
+        // unexpected capture loss. Keep its posted cancellation authoritative.
+        if self
+            .state
+            .pointer_capture
+            .has_pending_cancel(self.state.pointer_capture.own_generation.get())
+        {
+            self.release_pointer_capture(CaptureReleaseReason::Cancelled);
+            return Some(0);
+        }
         self.release_pointer_capture(CaptureReleaseReason::MouseUp);
 
         if let Some((target, _, position)) = self.internal_drag_target(handle, lparam) {
@@ -2135,6 +2145,28 @@ mod pointer_capture_tests {
             capture.take_cancel(generation),
             Some(PointerCancelReason::CaptureLost)
         );
+        assert!(capture.take_cancel(generation).is_none());
+    }
+
+    #[test]
+    fn pointer_cancel_pending_loss_rejects_a_late_mouse_up() {
+        let capture = PointerCaptureState::default();
+        capture.begin();
+        let generation = capture
+            .queue_cancel(PointerCancelReason::CaptureLost)
+            .expect("lost capture");
+        assert!(capture.has_pending_cancel(capture.own_generation.get()));
+        // Match the late-up path: release capture without completing the
+        // gesture, then let the posted message clear GPUI's pointer state.
+        {
+            let _guard = capture.release(CaptureReleaseReason::Cancelled);
+            assert!(capture.has_pending_cancel(generation));
+        }
+        assert_eq!(
+            capture.take_cancel(generation),
+            Some(PointerCancelReason::CaptureLost)
+        );
+        assert!(!capture.has_pending_cancel(generation));
         assert!(capture.take_cancel(generation).is_none());
     }
 

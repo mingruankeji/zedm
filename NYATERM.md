@@ -424,6 +424,18 @@ Branch CI now covers safe HWND queries, cancellation and GPUI drag lifecycle
 alongside the existing native file export suite. Interactive external application
 dragging, mixed DPI and live remote exports remain pending manual verification.
 
+## 2026-10-14 cancellation wins over queued button-up
+
+Reject a mouse-up whose gesture already has a pending unexpected capture
+cancellation. Windows can have queued the button-up before the posted cancel
+notification, so treating it as an ordinary release would accept a drop or
+detach a tab that was already cancelled. Preserve the queued notification and
+its generation instead; ordinary releases and OLE handoff remain unchanged.
+
+Windows validation: pointer cancellation suite (6 passed), gpui_windows check
+and scoped fmt passed. The added state regression preserves the once-only
+notification through the late-up release path.
+
 Validation is on Windows; native macOS/Linux checks are delegated to the
 branch workflow. Interactive GUI/file-drop and real-server authentication
 checks were not performed by this update. Their outcomes must not be inferred
