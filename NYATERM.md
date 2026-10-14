@@ -1,5 +1,22 @@
 # NyaTerm fork notes
 
+## 2026-10-14 safe Windows internal drag targets
+
+Internal drag routing previously read the HWND under the pointer's
+`GWLP_USERDATA` as a Rust `Weak<WindowsWindowInner>`, even for another process.
+Electron windows commonly populate that slot, so hovering an internal component
+over VS Code could dereference a foreign address. Window lookup now upgrades
+only weak references registered on the creating UI thread; `WM_NCDESTROY`
+unregisters before callbacks. Routing also rejects another GPUI platform instance.
+The native window procedure retains ownership of its own user-data allocation.
+
+Validation on Windows: `cargo test -p gpui_windows --features test-support
+internal_drag --lib` passed 4 tests (one additional ignored subprocess fixture
+is executed by its parent test). Coverage includes hidden non-GPUI windows with
+invalid nonzero user data, a real foreign-process HWND, expired/unregistered and
+reused registry keys, and lookup from a different UI thread. Interactive NyaTerm
+gestures are validated separately by the consuming application.
+
 This branch carries [NyaTerm](https://github.com/nyakang/nyaterm)'s local changes
 to GPUI on top of an unmodified upstream base.
 

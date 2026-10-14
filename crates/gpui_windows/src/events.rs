@@ -616,6 +616,12 @@ impl WindowsWindowInner {
             return None;
         }
         let target = window_from_hwnd(target_handle)?;
+        if !Rc::ptr_eq(
+            &self.state.internal_drag_active,
+            &target.state.internal_drag_active,
+        ) {
+            return None;
+        }
         let mut client_point = screen_point;
         if !unsafe { ScreenToClient(target_handle, &mut client_point) }.as_bool() {
             return None;

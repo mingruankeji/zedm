@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     num::NonZeroIsize,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -1545,6 +1546,39 @@ enum WindowOpenState {
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
 
+// HWND user data belongs to the window's creator, including for foreign
+// processes. Only objects registered on this UI thread may be upgraded here.
+struct WindowRegistry<T> {
+    windows: HashMap<isize, Weak<T>>,
+}
+
+impl<T> Default for WindowRegistry<T> {
+    fn default() -> Self {
+        Self {
+            windows: HashMap::new(),
+        }
+    }
+}
+
+impl<T> WindowRegistry<T> {
+    fn register(&mut self, hwnd: HWND, window: &Rc<T>) {
+        self.windows.insert(hwnd.0 as isize, Rc::downgrade(window));
+    }
+
+    fn remove(&mut self, hwnd: HWND) {
+        self.windows.remove(&(hwnd.0 as isize));
+    }
+
+    fn get(&self, hwnd: HWND) -> Option<Rc<T>> {
+        self.windows.get(&(hwnd.0 as isize))?.upgrade()
+    }
+}
+
+thread_local! {
+    static WINDOW_REGISTRY: RefCell<WindowRegistry<WindowsWindowInner>> =
+        RefCell::new(WindowRegistry::default());
+}
+
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -1573,6 +1607,8 @@ unsafe extern "system" fn window_procedure(
         let window_creation_context = unsafe { &mut *window_creation_context };
         return match WindowsWindowInner::new(window_creation_context, hwnd, window_params) {
             Ok(window_state) => {
+                WINDOW_REGISTRY
+                    .with(|registry| registry.borrow_mut().register(hwnd, &window_state));
                 let weak = Box::new(Rc::downgrade(&window_state));
                 unsafe { set_window_long(hwnd, GWLP_USERDATA, Box::into_raw(weak) as isize) };
                 window_creation_context.inner = Some(Ok(window_state));
@@ -1583,6 +1619,10 @@ unsafe extern "system" fn window_procedure(
                 LRESULT(0)
             }
         };
+    }
+
+    if msg == WM_NCDESTROY {
+        WINDOW_REGISTRY.with(|registry| registry.borrow_mut().remove(hwnd));
     }
 
     let ptr = unsafe { get_window_long(hwnd, GWLP_USERDATA) } as *mut Weak<WindowsWindowInner>;
@@ -1608,17 +1648,7 @@ unsafe extern "system" fn window_procedure(
 }
 
 pub(crate) fn window_from_hwnd(hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
-    if hwnd.is_invalid() {
-        return None;
-    }
-
-    let ptr = unsafe { get_window_long(hwnd, GWLP_USERDATA) } as *mut Weak<WindowsWindowInner>;
-    if !ptr.is_null() {
-        let inner = unsafe { &*ptr };
-        inner.upgrade()
-    } else {
-        None
-    }
+    WINDOW_REGISTRY.with(|registry| registry.borrow().get(hwnd))
 }
 
 fn get_module_handle() -> HMODULE {
@@ -1807,9 +1837,149 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::ClickState;
+    use super::{ClickState, WindowRegistry, window_from_hwnd};
     use gpui::{DevicePixels, MouseButton, point};
-    use std::time::Duration;
+    use std::{
+        io::{BufRead, Write},
+        process::{Command, Stdio},
+        rc::Rc,
+        time::Duration,
+    };
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, GWLP_USERDATA, WINDOW_EX_STYLE, WS_OVERLAPPED,
+            },
+        },
+        core::w,
+    };
+
+    struct NativeWindow(HWND);
+
+    impl NativeWindow {
+        fn new() -> Self {
+            Self(
+                unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        w!("STATIC"),
+                        w!(""),
+                        WS_OVERLAPPED,
+                        0,
+                        0,
+                        1,
+                        1,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                .expect("create hidden non-GPUI test window"),
+            )
+        }
+    }
+
+    impl Drop for NativeWindow {
+        fn drop(&mut self) {
+            unsafe { DestroyWindow(self.0) }.expect("destroy hidden test window");
+        }
+    }
+
+    #[test]
+    fn internal_drag_rejects_non_gpui_window_with_invalid_user_data() {
+        let window = NativeWindow::new();
+        for value in [1, isize::MAX] {
+            unsafe { super::set_window_long(window.0, GWLP_USERDATA, value) };
+            assert!(window_from_hwnd(window.0).is_none());
+        }
+        assert!(window_from_hwnd(HWND::default()).is_none());
+    }
+
+    #[test]
+    fn internal_drag_registry_rejects_expired_destroyed_and_reused_handles() {
+        let hwnd = HWND(1 as _);
+        let first = Rc::new(1);
+        let mut registry = WindowRegistry::default();
+        registry.register(hwnd, &first);
+        assert!(Rc::ptr_eq(
+            &registry.get(hwnd).expect("live window"),
+            &first
+        ));
+        drop(first);
+        assert!(registry.get(hwnd).is_none());
+        let second = Rc::new(2);
+        registry.register(hwnd, &second);
+        registry.remove(hwnd);
+        assert!(registry.get(hwnd).is_none());
+        registry.register(hwnd, &second);
+        assert!(Rc::ptr_eq(
+            &registry.get(hwnd).expect("reused handle"),
+            &second
+        ));
+    }
+
+    #[test]
+    fn internal_drag_window_lookup_is_ui_thread_local() {
+        let window = NativeWindow::new();
+        let handle = window.0.0 as isize;
+        std::thread::spawn(move || {
+            assert!(window_from_hwnd(HWND(handle as _)).is_none());
+        })
+        .join()
+        .expect("lookup on another thread");
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for internal_drag_rejects_foreign_process_window"]
+    fn internal_drag_foreign_window_fixture() {
+        if std::env::var_os("GPUI_FOREIGN_WINDOW_FIXTURE").is_none() {
+            return;
+        }
+        let window = NativeWindow::new();
+        unsafe { super::set_window_long(window.0, GWLP_USERDATA, 1) };
+        println!("foreign-window-hwnd:{}", window.0.0 as usize);
+        std::io::stdout().flush().expect("flush fixture handle");
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .expect("wait for parent");
+    }
+
+    #[test]
+    fn internal_drag_rejects_foreign_process_window() {
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "window::tests::internal_drag_foreign_window_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GPUI_FOREIGN_WINDOW_FIXTURE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start foreign window fixture");
+        let mut output =
+            std::io::BufReader::new(child.stdout.take().expect("fixture output")).lines();
+        let handle = output
+            .find_map(|line| {
+                let line = line.expect("read fixture output");
+                let (_, handle) = line.split_once("foreign-window-hwnd:")?;
+                handle.trim().parse::<usize>().ok()
+            })
+            .expect("foreign window handle");
+        let rejected = window_from_hwnd(HWND(handle as _)).is_none();
+        child
+            .stdin
+            .take()
+            .expect("fixture input")
+            .write_all(b"done\n")
+            .expect("stop fixture");
+        assert!(child.wait().expect("wait for fixture").success());
+        assert!(rejected);
+    }
 
     #[test]
     fn test_double_click_interval() {
