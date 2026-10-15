@@ -482,6 +482,50 @@ fn test_block_with_timeout() {
     });
 }
 
+#[test]
+fn timed_blocks_complete_while_real_workers_wake_tasks() {
+    // Supervise the scheduler thread so a lock inversion fails the test instead
+    // of hanging the entire test binary, as it would during GPUI app shutdown.
+    let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+    let driver = std::thread::spawn(move || {
+        let scheduler = Arc::new(TestScheduler::new(TestSchedulerConfig {
+            allow_parking: true,
+            ..TestSchedulerConfig::default()
+        }));
+        scheduler.set_timeout_ticks(1_000..=1_000);
+        let foreground = scheduler.foreground();
+        let (work_sender, work_receiver) = std::sync::mpsc::channel::<oneshot::Sender<usize>>();
+        let worker = std::thread::spawn(move || {
+            for (index, sender) in work_receiver.into_iter().enumerate() {
+                sender
+                    .send(index)
+                    .expect("completion receiver must be alive");
+            }
+        });
+        for index in 0..10_000 {
+            let (sender, receiver) = oneshot::channel();
+            let task = scheduler
+                .background()
+                .spawn(async move { receiver.await.expect("worker must deliver a completion") });
+            scheduler.run();
+            work_sender.send(sender).expect("worker must be alive");
+            assert_eq!(
+                foreground
+                    .block_with_timeout(Duration::from_secs(5), task)
+                    .ok(),
+                Some(index)
+            );
+        }
+        drop(work_sender);
+        worker.join().expect("completion worker panicked");
+        finished_sender.send(()).expect("supervisor must be alive");
+    });
+    finished_receiver
+        .recv_timeout(Duration::from_secs(30))
+        .expect("timed block deadlocked with a worker completion");
+    driver.join().expect("scheduler driver panicked");
+}
+
 // When calling block, we shouldn't make progress on foreground-spawned futures with the same session id.
 #[test]
 fn test_block_does_not_progress_same_session_foreground() {

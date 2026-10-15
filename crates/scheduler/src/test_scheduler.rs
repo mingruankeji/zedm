@@ -110,9 +110,11 @@ impl TestScheduler {
         });
         let waker = unsafe { Waker::new(Box::into_raw(waker) as *const (), &WAKER_VTABLE) };
         let max_ticks = if timeout.is_some() {
-            self.rng
-                .lock()
-                .random_range(self.state.lock().timeout_ticks.clone())
+            // Real workers may enqueue a completion while a test is blocking.
+            // Scheduling takes state before the RNG; do not hold the RNG while
+            // waiting for state here, or application shutdown can deadlock.
+            let timeout_ticks = self.state.lock().timeout_ticks.clone();
+            self.rng.lock().random_range(timeout_ticks)
         } else {
             usize::MAX
         };

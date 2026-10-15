@@ -440,3 +440,17 @@ Validation is on Windows; native macOS/Linux checks are delegated to the
 branch workflow. Interactive GUI/file-drop and real-server authentication
 checks were not performed by this update. Their outcomes must not be inferred
 from scripted peers or compile checks.
+
+## 2026-10-15 timed test shutdown and real worker completions
+
+Read the test timeout tick budget before locking the scheduler RNG. Previously
+`block_until` locked the RNG and then scheduler state, while a real worker waking
+a foreground or background task locked state and then the RNG. GPUI test app
+shutdown could deadlock with a storage completion after windows were released.
+The change keeps random choices and timeout budgets intact and removes the
+opposing nested lock acquisition.
+
+Windows validation: all 30 scheduler tests passed, including a bounded regression
+with 10,000 timed waits completed by a real worker. Scoped scheduler formatting
+passed. The branch workflow now runs scheduler tests on macOS and Windows.
+Native macOS validation remains pending CI.

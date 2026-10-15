@@ -67,6 +67,9 @@ jobs:
       - name: Check
         run: cargo check ${{ matrix.args }}
 
+      - name: Scheduler lifecycle tests
+        run: cargo test -p scheduler --locked
+
       - name: Native file promise delegate test
         if: runner.os == 'macOS'
         run: cargo test -p gpui_macos file_promise --lib
