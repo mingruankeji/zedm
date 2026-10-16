@@ -5193,17 +5193,14 @@ impl Window {
                 "dynamic texture payload length does not match its dimensions"
             ));
         }
-        let mut packed = Vec::with_capacity(row_bytes * height);
-        for row in 0..height {
-            packed.extend_from_slice(&bytes[row * source_stride..row * source_stride + row_bytes]);
-        }
+        let packed = dynamic_texture_bytes(bytes, row_bytes, height, source_stride)?;
         let texture = DynamicTexture {
             id: DynamicTextureId(NEXT_DYNAMIC_TEXTURE_ID.fetch_add(1, Ordering::Relaxed)),
             size,
         };
         self.sprite_atlas
             .get_or_insert_with(crate::AtlasKey::DynamicTexture(texture.id), &mut || {
-                Ok(Some((size, Cow::Owned(packed.clone()))))
+                Ok(Some((size, Cow::Borrowed(packed.as_ref()))))
             })?
             .context("failed to allocate dynamic texture")?;
         Ok(texture)
@@ -8028,6 +8025,69 @@ fn with_element_arena_erased(callback: &mut dyn FnMut(&mut Arena)) -> Result<(),
         Ok(())
     } else {
         ELEMENT_ARENA.try_with(|arena| callback(&mut arena.borrow_mut()))
+    }
+}
+
+/// Atlas insertion consumes bytes synchronously. Keep ordinary framebuffers
+/// borrowed and allocate only when source rows contain padding.
+fn dynamic_texture_bytes(
+    bytes: &[u8],
+    row_bytes: usize,
+    height: usize,
+    stride: usize,
+) -> Result<Cow<'_, [u8]>> {
+    let len = row_bytes
+        .checked_mul(height)
+        .context("dynamic texture size overflow")?;
+    let required = height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(stride))
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .context("dynamic texture source size overflow")?;
+    anyhow::ensure!(
+        row_bytes > 0 && stride >= row_bytes && bytes.len() == required,
+        "invalid dynamic texture payload"
+    );
+    if row_bytes == stride {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let mut packed = Vec::new();
+    packed
+        .try_reserve_exact(len)
+        .context("failed to allocate dynamic texture staging buffer")?;
+    for row in 0..height {
+        packed.extend_from_slice(&bytes[row * stride..row * stride + row_bytes]);
+    }
+    Ok(Cow::Owned(packed))
+}
+
+#[cfg(test)]
+mod dynamic_texture_allocation_tests {
+    use super::dynamic_texture_bytes;
+    use std::borrow::Cow;
+
+    #[test]
+    fn packed_texture_borrows_original_pixels() {
+        let bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+        let packed = dynamic_texture_bytes(&bytes, 4, 2, 4).unwrap();
+        assert!(matches!(packed, Cow::Borrowed(_)));
+        assert_eq!(packed.as_ptr(), bytes.as_ptr());
+    }
+
+    #[test]
+    fn padded_texture_copies_only_visible_rows() {
+        let bytes = [1, 2, 0, 0, 3, 4];
+        assert_eq!(
+            dynamic_texture_bytes(&bytes, 2, 2, 4).unwrap().as_ref(),
+            &[1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn invalid_or_overflowing_textures_return_errors() {
+        assert!(dynamic_texture_bytes(&[], 4, 0, 4).is_err());
+        assert!(dynamic_texture_bytes(&[0; 4], 4, 2, 4).is_err());
+        assert!(dynamic_texture_bytes(&[], usize::MAX, 2, usize::MAX).is_err());
     }
 }
 
