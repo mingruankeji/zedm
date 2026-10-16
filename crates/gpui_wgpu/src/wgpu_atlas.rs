@@ -199,7 +199,7 @@ impl WgpuAtlasTextures {
             }
         }
 
-        let texture = self.push_texture(size, texture_kind);
+        let texture = self.push_texture(size, texture_kind)?;
         texture.allocate(size)
     }
 
@@ -207,7 +207,7 @@ impl WgpuAtlasTextures {
         &mut self,
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
-    ) -> &mut WgpuAtlasTexture {
+    ) -> Option<&mut WgpuAtlasTexture> {
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
@@ -224,6 +224,14 @@ impl WgpuAtlasTextures {
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
         };
 
+        // Native wgpu resolves allocation scopes synchronously. Capture GPU OOM
+        // before it reaches the default uncaptured-error panic handler.
+        #[cfg(not(target_family = "wasm"))]
+        let scopes = (
+            self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
+            self.device.push_error_scope(wgpu::ErrorFilter::Validation),
+            self.device.push_error_scope(wgpu::ErrorFilter::Internal),
+        );
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
             size: wgpu::Extent3d {
@@ -240,6 +248,15 @@ impl WgpuAtlasTextures {
         });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let internal_ok = allocation_scope_succeeded(scopes.2);
+            let validation_ok = allocation_scope_succeeded(scopes.1);
+            let memory_ok = allocation_scope_succeeded(scopes.0);
+            if !internal_ok || !validation_ok || !memory_ok {
+                return None;
+            }
+        }
 
         let texture_list = &mut self.storage[kind];
         let index = texture_list.free_list.pop();
@@ -261,18 +278,10 @@ impl WgpuAtlasTextures {
 
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
-            texture_list
-                .textures
-                .get_mut(ix)
-                .and_then(|t| t.as_mut())
-                .expect("texture must exist")
+            texture_list.textures.get_mut(ix).and_then(|t| t.as_mut())
         } else {
             texture_list.textures.push(Some(atlas_texture));
-            texture_list
-                .textures
-                .last_mut()
-                .and_then(|t| t.as_mut())
-                .expect("texture must exist")
+            texture_list.textures.last_mut().and_then(|t| t.as_mut())
         }
     }
 
@@ -526,6 +535,43 @@ mod tests {
     }
 
     #[test]
+    fn native_allocation_errors_do_not_poison_later_allocations() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let limit = device.limits().max_texture_dimension_2d;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let mut state = atlas.0.lock();
+        // Ask for an invalid GPU extent, without allocating a huge CPU buffer
+        // or exhausting GPU memory. The native error must be captured.
+        state.backend.max_texture_size = limit + 1;
+        assert!(
+            state
+                .backend
+                .push_texture(
+                    Size {
+                        width: DevicePixels((limit + 1) as i32),
+                        height: DevicePixels(1),
+                    },
+                    AtlasTextureKind::Polychrome
+                )
+                .is_none()
+        );
+        state.backend.max_texture_size = limit;
+        assert!(
+            state
+                .backend
+                .push_texture(
+                    Size {
+                        width: DevicePixels(1),
+                        height: DevicePixels(1),
+                    },
+                    AtlasTextureKind::Polychrome
+                )
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn before_frame_skips_uploads_for_removed_texture() -> anyhow::Result<()> {
         let (device, queue) = test_device_and_queue()?;
 
@@ -656,4 +702,19 @@ mod tests {
             vec![0x30, 0x20, 0x10, 0x40, 0xCC, 0xBB, 0xAA, 0xDD]
         );
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn allocation_scope_succeeded(scope: wgpu::ErrorScopeGuard) -> bool {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    // Do not wait on a driver or a future from a different backend on the UI
+    // thread. An unexpectedly deferred result is conservatively rejected.
+    let mut result = std::pin::pin!(scope.pop());
+    matches!(
+        result
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(None)
+    )
 }

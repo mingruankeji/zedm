@@ -465,3 +465,18 @@ atlas allocations on failure.
 Windows validation: GPUI dynamic_texture tests (4 passed), WGPU swizzle tests
 (2 passed), including packed borrowing, padded extraction and overflow checks.
 Native GPU exhaustion and macOS/Linux execution remain unverified.
+
+## 2026-10-17 native atlas allocation errors
+
+Metal atlas allocation checks newTextureWithDescriptor for nil before creating
+an owned texture wrapper. Native WGPU atlas allocation captures memory,
+validation and internal errors in device scopes; it polls their synchronous
+native results once, returning failure without blocking the UI. A deferred
+result is conservatively rejected. Browser WGPU behavior is unchanged.
+
+Windows validation: cargo test -p gpui_wgpu --lib wgpu_atlas::tests --offline
+passed all six tests, including an invalid native extent followed by a healthy
+allocation. The existing four dynamic_texture tests also pass. Metal changes
+were inspected only; macOS runtime validation remains required. DirectX
+CreateTexture2D already returns allocation errors; DirectX/Metal uploads borrow
+the input slice, while WGPU retains one fallible copy until frame submission.

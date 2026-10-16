@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result};
 use derive_more::{Deref, DerefMut};
 use etagere::BucketedAtlasAllocator;
+use foreign_types::{ForeignType, ForeignTypeRef};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
@@ -138,7 +139,7 @@ impl MetalAtlasTextures {
             }
         }
 
-        let texture = self.push_texture(size, texture_kind);
+        let texture = self.push_texture(size, texture_kind)?;
         texture.allocate(size)
     }
 
@@ -146,7 +147,7 @@ impl MetalAtlasTextures {
         &mut self,
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
-    ) -> &mut MetalAtlasTexture {
+    ) -> Option<&mut MetalAtlasTexture> {
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
@@ -182,7 +183,19 @@ impl MetalAtlasTextures {
         } else {
             metal::MTLStorageMode::Managed
         });
-        let metal_texture = self.device.new_texture(&texture_descriptor);
+        // metal::Device::new_texture assumes a non-null result. Metal returns
+        // nil on allocation failure, which must stay a recoverable atlas error.
+        let raw: *mut objc2::runtime::AnyObject = unsafe {
+            objc2::msg_send![
+                self.device.as_ptr().cast::<objc2::runtime::AnyObject>(),
+                newTextureWithDescriptor: texture_descriptor.as_ptr().cast::<objc2::runtime::AnyObject>()
+            ]
+        };
+        if raw.is_null() {
+            return None;
+        }
+        // newTextureWithDescriptor returns a retained object; transfer ownership.
+        let metal_texture = unsafe { metal::Texture::from_ptr(raw.cast()) };
 
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
@@ -208,10 +221,8 @@ impl MetalAtlasTextures {
         } else {
             texture_list.textures.push(Some(atlas_texture));
             texture_list.textures.last_mut()
-        }
-        .unwrap()
+        }?
         .as_mut()
-        .unwrap()
     }
 
     fn texture(&self, id: AtlasTextureId) -> Option<&MetalAtlasTexture> {
