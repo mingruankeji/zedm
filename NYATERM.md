@@ -454,3 +454,14 @@ Windows validation: all 30 scheduler tests passed, including a bounded regressio
 with 10,000 timed waits completed by a real worker. Scoped scheduler formatting
 passed. The branch workflow now runs scheduler tests on macOS and Windows.
 Native macOS validation remains pending CI.
+
+## 2026-10-17 bounded dynamic texture staging
+
+Borrow packed dynamic texture pixels and allocate padded row staging fallibly
+without cloning the complete frame. WGPU retains one upload buffer until submit,
+so make that copy and the pending-upload reservation fallible and roll back
+atlas allocations on failure.
+
+Windows validation: GPUI dynamic_texture tests (4 passed), WGPU swizzle tests
+(2 passed), including packed borrowing, padded extraction and overflow checks.
+Native GPU exhaustion and macOS/Linux execution remain unverified.
