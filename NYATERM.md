@@ -480,3 +480,27 @@ allocation. The existing four dynamic_texture tests also pass. Metal changes
 were inspected only; macOS runtime validation remains required. DirectX
 CreateTexture2D already returns allocation errors; DirectX/Metal uploads borrow
 the input slice, while WGPU retains one fallible copy until frame submission.
+
+## 2026-10-18 Windows modal owner restoration before hide
+
+Restore a modal GPUI window's disabled owner before hiding it, while the dialog
+still has foreground activation. The deferred Drop path still waits for active
+native prompts to finish. Accepted WM_CLOSE requests use the same one-shot
+restoration; rejected requests leave modality intact. WM_DESTROY only re-enables
+an unreleased owner, without requesting foreground activation. Re-check the
+foreground after EnableWindow so background closes cannot steal another app's
+focus. Owner selection remains GetActiveWindow; no public API changes.
+
+Debug diagnostics contain only HWNDs, lifecycle stages and validity/enabled/
+activation results. Failed owner enabling or foreground restoration is warned;
+no titles, input, credentials or connection data are logged.
+
+Windows validation: `cargo test -p gpui_windows --features test-support --
+--test-threads=1` passed (49 tests; one subprocess fixture ignored by the parent
+harness). Six new native-window tests cover enable-before-hide (observed at
+WM_SHOWWINDOW after pumping ShowWindowAsync), one-shot restoration, rejected
+close, destroyed/missing owners, background close and owner/child/sibling routing.
+Existing native-dialog serialization/cancellation tests also pass.
+
+`cargo check -p gpui -p gpui_windows -p gpui_platform` and
+`cargo fmt -p gpui_windows -- --check` also passed on Windows.

@@ -112,7 +112,7 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) validation_number: usize,
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
-    pub(crate) parent_hwnd: Option<HWND>,
+    pub(crate) modal_owner: crate::modal_owner::ModalOwner,
 }
 
 impl WindowsWindowState {
@@ -313,7 +313,7 @@ impl WindowsWindowInner {
             main_receiver: context.main_receiver.clone(),
             platform_window_handle: context.platform_window_handle,
             system_settings: WindowsSystemSettings::new(),
-            parent_hwnd: context.parent_hwnd,
+            modal_owner: crate::modal_owner::ModalOwner::new(context.parent_hwnd),
         }))
     }
 
@@ -549,6 +549,12 @@ impl WindowsWindow {
             DisabledOwnerGuard(None)
         };
         let parent_hwnd = owner_guard.owner();
+        if params.kind == WindowKind::Dialog {
+            log::debug!(
+                "modal dialog owner selected: owner={parent_hwnd:?} foreground={:?}",
+                unsafe { GetForegroundWindow() }
+            );
+        }
         let hide_title_bar = params
             .titlebar
             .as_ref()
@@ -644,6 +650,12 @@ impl WindowsWindow {
         let this = context.inner.take().transpose()?;
         let hwnd = creation_result?;
         let this = this.unwrap();
+        if params.kind == WindowKind::Dialog {
+            log::debug!(
+                "modal dialog created: dialog={hwnd:?} owner={parent_hwnd:?} foreground={:?}",
+                unsafe { GetForegroundWindow() }
+            );
+        }
 
         register_drag_drop(&this)?;
         set_non_rude_hwnd(hwnd, true);
@@ -689,7 +701,10 @@ impl Drop for WindowsWindow {
     fn drop(&mut self) {
         self.0.drag_lifetime.borrow_mut().take();
         self.0.dialog_owner.close();
-        unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
+        let restore_modal_owner = self.0.modal_owner.is_pending();
+        if !restore_modal_owner {
+            unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
+        }
         // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
         // resulting visibility report has nothing to notify.
         self.0.state.callbacks.visibility_change.take();
@@ -700,6 +715,12 @@ impl Drop for WindowsWindow {
             .spawn(async move {
                 this.dialog_owner.when_idle().await;
                 let handle = this.hwnd;
+                if !unsafe { IsWindow(Some(handle)).as_bool() } {
+                    return;
+                }
+                if restore_modal_owner {
+                    this.modal_owner.hide(handle);
+                }
                 unsafe {
                     RevokeDragDrop(handle).log_err();
                     DestroyWindow(handle).log_err();

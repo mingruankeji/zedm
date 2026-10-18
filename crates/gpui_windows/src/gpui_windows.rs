@@ -15,6 +15,7 @@ mod external_drag;
 #[cfg(test)]
 mod external_drag_tests;
 mod keyboard;
+mod modal_owner;
 mod platform;
 mod system_notifications;
 mod system_settings;

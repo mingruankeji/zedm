@@ -259,7 +259,7 @@ impl WindowsWindowInner {
             WM_DISPLAYCHANGE => self.handle_display_change_msg(handle),
             WM_NCHITTEST => self.handle_hit_test_msg(handle, lparam),
             WM_PAINT => self.handle_paint_msg(handle),
-            WM_CLOSE => self.handle_close_msg(),
+            WM_CLOSE => self.handle_close_msg(handle),
             WM_DESTROY => self.handle_destroy_msg(handle),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
             WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
@@ -468,22 +468,25 @@ impl WindowsWindowInner {
         self.draw_window(handle, false)
     }
 
-    fn handle_close_msg(&self) -> Option<isize> {
-        let mut callback = self.state.callbacks.should_close.take()?;
-        let should_close = callback();
-        self.state.callbacks.should_close.set(Some(callback));
-        if should_close { None } else { Some(0) }
+    fn handle_close_msg(&self, handle: HWND) -> Option<isize> {
+        let should_close = if let Some(mut callback) = self.state.callbacks.should_close.take() {
+            let should_close = callback();
+            self.state.callbacks.should_close.set(Some(callback));
+            should_close
+        } else {
+            true
+        };
+        if self.modal_owner.close_requested(handle, should_close) {
+            None
+        } else {
+            Some(0)
+        }
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
         let callback = { self.state.callbacks.close.take() };
-        // Re-enable parent window if this was a modal dialog
-        if let Some(parent_hwnd) = self.parent_hwnd {
-            unsafe {
-                let _ = EnableWindow(parent_hwnd, true);
-                let _ = SetForegroundWindow(parent_hwnd);
-            }
-        }
+        self.modal_owner
+            .release(handle, crate::modal_owner::RestoreStage::Destroy);
 
         if let Some(callback) = callback {
             callback();
