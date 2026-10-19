@@ -151,7 +151,7 @@ fn virtual_data_object_defers_open_and_reads_multiple_unicode_files() {
     let second = source(Vec::new(), false);
     let payload = VirtualFileDragPayload::new([
         descriptor("你好.bin", first.clone()),
-        descriptor("empty", second.clone()),
+        descriptor("empty", second),
     ])
     .unwrap();
     let session = session(ExternalDragPayload::VirtualFiles(payload), &lifetime);
@@ -184,7 +184,7 @@ fn virtual_data_object_defers_open_and_reads_multiple_unicode_files() {
 fn streams_support_seek_clone_and_independent_reopen() {
     let lifetime = Arc::new(());
     let source = source(b"0123456789".to_vec(), false);
-    let payload = VirtualFileDragPayload::new([descriptor("test", source.clone())]).unwrap();
+    let payload = VirtualFileDragPayload::new([descriptor("test", source)]).unwrap();
     let data = data(session(
         ExternalDragPayload::VirtualFiles(payload),
         &lifetime,
@@ -228,7 +228,7 @@ fn metadata_only_cancel_does_not_open_and_window_drop_cancels() {
     let source = source(b"data".to_vec(), false);
     let payload = VirtualFileDragPayload::new([descriptor("test", source.clone())]).unwrap();
     let session = session(ExternalDragPayload::VirtualFiles(payload), &lifetime);
-    let data = data(session.clone());
+    let data = data(session);
     let stream = content(&data, 0);
     drop(lifetime);
     assert_eq!(read(&stream, 1).0, STG_E_REVERTED);

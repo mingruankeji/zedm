@@ -1978,6 +1978,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this synchronous subprocess fixture runs outside the UI executor"
+    )]
     fn internal_drag_rejects_foreign_process_window() {
         let mut child = Command::new(std::env::current_exe().expect("test executable"))
             .args([

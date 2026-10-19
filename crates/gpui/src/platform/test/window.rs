@@ -1,13 +1,11 @@
 use crate::{
-    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, DevicePixels,
-    DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, RequestFrameOptions, Scene, Size, TestDisplay, TestPlatform,
-    TextInputConfiguration, TextInputStateChange, TileId, WindowAppearance,
+    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size,
+    TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
     WindowVisibility,
 };
-use collections::HashMap;
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -628,133 +626,137 @@ impl PlatformWindow for TestWindow {
         None
     }
 }
-pub(crate) struct TestAtlasState {
-    next_id: u32,
-    tiles: HashMap<AtlasKey, AtlasTile>,
-    pixels: HashMap<AtlasKey, Vec<u8>>,
-}
-
-pub(crate) struct TestAtlas(Mutex<TestAtlasState>);
-
-impl TestAtlas {
-    pub fn new() -> Self {
-        TestAtlas(Mutex::new(TestAtlasState {
-            next_id: 0,
-            tiles: HashMap::default(),
-            pixels: HashMap::default(),
-        }))
-    }
-}
-
-impl PlatformAtlas for TestAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: crate::AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
-            Option<(Size<crate::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
-        >,
-    ) -> anyhow::Result<Option<crate::AtlasTile>> {
-        let mut state = self.0.lock();
-        if let Some(&tile) = state.tiles.get(&key) {
-            return Ok(Some(tile));
-        }
-        drop(state);
-
-        let Some((size, bytes)) = build()? else {
-            return Ok(None);
-        };
-
-        let mut state = self.0.lock();
-        state.next_id += 1;
-        let texture_id = state.next_id;
-        state.next_id += 1;
-        let tile_id = state.next_id;
-
-        state.tiles.insert(
-            key.clone(),
-            crate::AtlasTile {
-                texture_id: AtlasTextureId {
-                    index: texture_id,
-                    kind: key.texture_kind(),
-                },
-                tile_id: TileId(tile_id),
-                padding: 0,
-                bounds: crate::Bounds {
-                    origin: Point::default(),
-                    size,
-                },
-            },
-        );
-        state.pixels.insert(key.clone(), bytes.into_owned());
-
-        Ok(Some(state.tiles[&key]))
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        let mut state = self.0.lock();
-        state.tiles.remove(key);
-        state.pixels.remove(key);
-    }
-
-    fn update(
-        &self,
-        key: &AtlasKey,
-        bounds: crate::Bounds<crate::DevicePixels>,
-        bytes: &[u8],
-        bytes_per_row: u32,
-    ) -> anyhow::Result<()> {
-        let mut state = self.0.lock();
-        let tile = *state
-            .tiles
-            .get(key)
-            .ok_or_else(|| anyhow::anyhow!("atlas tile was not found"))?;
-        anyhow::ensure!(
-            bounds.size.width.0 > 0
-                && bounds.size.height.0 > 0
-                && bytes_per_row >= bounds.size.width.0 as u32 * 4
-                && !bytes.is_empty(),
-            "invalid dynamic texture update"
-        );
-        let width = bounds.size.width.0 as usize;
-        let height = bounds.size.height.0 as usize;
-        let source_stride = bytes_per_row as usize;
-        let row_bytes = width * 4;
-        let required = (height - 1) * source_stride + row_bytes;
-        anyhow::ensure!(bytes.len() == required, "invalid dynamic texture payload");
-        let right = bounds.origin.x.0 + bounds.size.width.0;
-        let bottom = bounds.origin.y.0 + bounds.size.height.0;
-        anyhow::ensure!(
-            bounds.origin.x.0 >= 0
-                && bounds.origin.y.0 >= 0
-                && right <= tile.bounds.size.width.0
-                && bottom <= tile.bounds.size.height.0,
-            "dynamic texture update is out of bounds"
-        );
-        let destination_stride = tile.bounds.size.width.0 as usize * 4;
-        let destination = state
-            .pixels
-            .get_mut(key)
-            .ok_or_else(|| anyhow::anyhow!("atlas pixels were not found"))?;
-        for row in 0..height {
-            let source = &bytes[row * source_stride..row * source_stride + row_bytes];
-            let offset = (bounds.origin.y.0 as usize + row) * destination_stride
-                + bounds.origin.x.0 as usize * 4;
-            destination[offset..offset + row_bytes].copy_from_slice(source);
-        }
-        Ok(())
-    }
-
-    fn contains(&self, key: &AtlasKey) -> bool {
-        self.0.lock().tiles.contains_key(key)
-    }
-}
-
 #[cfg(test)]
 mod dynamic_texture_tests {
     use std::borrow::Cow;
 
-    use super::TestAtlas;
-    use crate::{AtlasKey, Bounds, DevicePixels, DynamicTextureId, PlatformAtlas, point, size};
+    use crate::{
+        AtlasKey, AtlasTextureId, AtlasTile, Bounds, DevicePixels, DynamicTextureId, PlatformAtlas,
+        Point, Size, TileId, point, size,
+    };
+    use collections::HashMap;
+    use parking_lot::Mutex;
+
+    pub(crate) struct TestAtlasState {
+        next_id: u32,
+        tiles: HashMap<AtlasKey, AtlasTile>,
+        pixels: HashMap<AtlasKey, Vec<u8>>,
+    }
+
+    pub(crate) struct TestAtlas(Mutex<TestAtlasState>);
+
+    impl TestAtlas {
+        pub fn new() -> Self {
+            TestAtlas(Mutex::new(TestAtlasState {
+                next_id: 0,
+                tiles: HashMap::default(),
+                pixels: HashMap::default(),
+            }))
+        }
+    }
+
+    impl PlatformAtlas for TestAtlas {
+        fn get_or_insert_with<'a>(
+            &self,
+            key: crate::AtlasKey,
+            build: &mut dyn FnMut() -> anyhow::Result<
+                Option<(Size<crate::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
+            >,
+        ) -> anyhow::Result<Option<crate::AtlasTile>> {
+            let mut state = self.0.lock();
+            if let Some(&tile) = state.tiles.get(&key) {
+                return Ok(Some(tile));
+            }
+            drop(state);
+
+            let Some((size, bytes)) = build()? else {
+                return Ok(None);
+            };
+
+            let mut state = self.0.lock();
+            state.next_id += 1;
+            let texture_id = state.next_id;
+            state.next_id += 1;
+            let tile_id = state.next_id;
+
+            state.tiles.insert(
+                key.clone(),
+                crate::AtlasTile {
+                    texture_id: AtlasTextureId {
+                        index: texture_id,
+                        kind: key.texture_kind(),
+                    },
+                    tile_id: TileId(tile_id),
+                    padding: 0,
+                    bounds: crate::Bounds {
+                        origin: Point::default(),
+                        size,
+                    },
+                },
+            );
+            state.pixels.insert(key.clone(), bytes.into_owned());
+
+            Ok(Some(state.tiles[&key]))
+        }
+
+        fn remove(&self, key: &AtlasKey) {
+            let mut state = self.0.lock();
+            state.tiles.remove(key);
+            state.pixels.remove(key);
+        }
+
+        fn update(
+            &self,
+            key: &AtlasKey,
+            bounds: crate::Bounds<crate::DevicePixels>,
+            bytes: &[u8],
+            bytes_per_row: u32,
+        ) -> anyhow::Result<()> {
+            let mut state = self.0.lock();
+            let tile = *state
+                .tiles
+                .get(key)
+                .ok_or_else(|| anyhow::anyhow!("atlas tile was not found"))?;
+            anyhow::ensure!(
+                bounds.size.width.0 > 0
+                    && bounds.size.height.0 > 0
+                    && bytes_per_row >= bounds.size.width.0 as u32 * 4
+                    && !bytes.is_empty(),
+                "invalid dynamic texture update"
+            );
+            let width = bounds.size.width.0 as usize;
+            let height = bounds.size.height.0 as usize;
+            let source_stride = bytes_per_row as usize;
+            let row_bytes = width * 4;
+            let required = (height - 1) * source_stride + row_bytes;
+            anyhow::ensure!(bytes.len() == required, "invalid dynamic texture payload");
+            let right = bounds.origin.x.0 + bounds.size.width.0;
+            let bottom = bounds.origin.y.0 + bounds.size.height.0;
+            anyhow::ensure!(
+                bounds.origin.x.0 >= 0
+                    && bounds.origin.y.0 >= 0
+                    && right <= tile.bounds.size.width.0
+                    && bottom <= tile.bounds.size.height.0,
+                "dynamic texture update is out of bounds"
+            );
+            let destination_stride = tile.bounds.size.width.0 as usize * 4;
+            let destination = state
+                .pixels
+                .get_mut(key)
+                .ok_or_else(|| anyhow::anyhow!("atlas pixels were not found"))?;
+            for row in 0..height {
+                let source = &bytes[row * source_stride..row * source_stride + row_bytes];
+                let offset = (bounds.origin.y.0 as usize + row) * destination_stride
+                    + bounds.origin.x.0 as usize * 4;
+                destination[offset..offset + row_bytes].copy_from_slice(source);
+            }
+            Ok(())
+        }
+
+        fn contains(&self, key: &AtlasKey) -> bool {
+            self.0.lock().tiles.contains_key(key)
+        }
+    }
 
     #[test]
     fn strided_update_preserves_pixels_outside_the_dirty_rectangle() {
