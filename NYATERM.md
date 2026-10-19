@@ -22,7 +22,7 @@ to GPUI on top of an unmodified upstream base.
 
 - Fork: <https://github.com/nyakang/zed>
 - Upstream: <https://github.com/zed-industries/zed>
-- Base revision: `26363aabdb31a0c016728634202e1ad5067033aa` (upstream `main`, 2026-10-13)
+- Base revision: `042e0406d33cfb312ea7e5796870671e0afa7383` (upstream `main`, 2026-10-20)
 - Branch: `nyaterm`
 - Crates touched: `gpui`, `gpui_apple`, `gpui_wgpu`, `gpui_windows`,
   `gpui_linux`, `gpui_macos`, and `gpui_web`. Nothing else in the workspace is
@@ -504,3 +504,46 @@ Existing native-dialog serialization/cancellation tests also pass.
 
 `cargo check -p gpui -p gpui_windows -p gpui_platform` and
 `cargo fmt -p gpui_windows -- --check` also passed on Windows.
+
+## 2026-10-20 upstream rebase
+
+Fixed upstream main: `042e0406d33cfb312ea7e5796870671e0afa7383`.
+Previous published head: `77a6246ddff9cafa6a72380fee60feedaa89b7d2`.
+The original branch is retained locally as `backup/nyaterm-20261020`.
+
+Replay every maintained concern separately, including mutable textures and
+fallible staging/atlas allocation, hidden cursors, deferred cross-platform file
+exports, safe internal drag targets, pointer cancellation and late-release
+rejection, modal-owner restoration, and the timed scheduler lock fix.
+Retain upstream WindowInsets in the combined window imports. Upstream's WGPU
+30 git revision and new atlas sprite grouping are retained; no local feature is
+removed or replaced in this rebase. Original and final patches and range-diff
+are retained in the external synchronization audit directory.
+
+Windows validation with pinned Rust 1.98.1 passed:
+- GPUI, platform, Windows and WGPU cargo checks;
+- four dynamic-texture, six virtual-file and nine drag lifecycle tests;
+- 49 native Windows tests (one subprocess fixture ignored by the harness and
+  exercised by its parent), including modal owners and pointer cancellation;
+- six WGPU atlas tests, including a failed native allocation followed by success;
+- all 30 scheduler tests, including real-worker timed completion;
+- formatting for all eight affected GPUI/platform packages.
+
+The scoped script/clippy result and native platform workflow outcomes are
+recorded by the consuming NyaTerm synchronization report. Interactive native
+file dragging, mixed DPI, modal activation and live remote export are not
+claimed as tested by these automated checks. macOS/Linux native compilation
+and execution require the branch's platform jobs.
+
+The scoped strict lint script initially found that the fork's mock TestAtlas
+and its state were compiled outside unit tests and were unused with downstream
+test-support. Move the mock and its imports into dynamic_texture_tests instead
+of suppressing dead-code diagnostics; production code and public APIs are
+unchanged. The dirty-region regression is rerun after this test-only move.
+
+The final `script/clippy -p gpui_windows -p gpui_wgpu` passed its release,
+all-target, all-feature and deny-warning checks. Remove three redundant clones
+in native export fixtures and explicitly expect the UI-thread spawn prohibition
+only on the synchronous foreign-process unit-test fixture. The final four
+texture regressions and 49 native Windows tests passed again. These changes
+only affect test helpers and preserve the runtime patch series.
