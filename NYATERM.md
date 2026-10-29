@@ -1,5 +1,34 @@
 # NyaTerm fork notes
 
+## 2026-10-29 remove the Windows jump-list ICU import
+
+This continuation is maintained at <https://github.com/mingruankeji/zedm> on
+`nyaterm`, based exactly on nyakang/zed revision
+`c054331114f9abdc44e5d587cd23314db6ac5aff`.
+
+The Windows jump-list reader used ICU's `u_strlen` only to find the end of a
+shell-link description. The resulting eager `icuuc.dll` import prevented
+startup on Windows Server 2016, even without using the jump list. Replace it
+with a bounded Rust slice search, retaining UTF-16 lossy decoding and existing
+folder-list behavior. No dependencies or public APIs change.
+
+Six regression tests cover empty descriptions, the first null terminator,
+Unicode including surrogate pairs and folder separators, malformed UTF-16,
+a last-slot terminator, and a full buffer without a terminator. Removing this
+import alone does not establish full Windows Server 2016 compatibility.
+
+Validation on Windows with Rust 1.96.0, using path patches in the consuming
+NyaTerm workspace:
+
+```sh
+cargo test --offline -p nyaterm-ui -p gpui_windows --features gpui/test-support --lib shell_link_description
+```
+
+All six tests passed. `rustfmt --edition 2024 --check` on the changed Rust file
+and `git diff --check` also passed. MSVC `dumpbin /imports` confirmed that the
+previous NyaTerm release executable imported `u_strlen` from `icuuc.dll`.
+The consuming application validates the final executable's imports separately.
+
 ## 2026-10-14 safe Windows internal drag targets
 
 Internal drag routing previously read the HWND under the pointer's
