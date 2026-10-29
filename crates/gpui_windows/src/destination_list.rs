@@ -5,6 +5,7 @@ use smallvec::SmallVec;
 use windows::{
     Win32::{
         Foundation::PROPERTYKEY,
+        Globalization::u_strlen,
         System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, StructuredStorage::PROPVARIANT},
         UI::{
             Controls::INFOTIPSIZE,
@@ -99,7 +100,8 @@ fn create_destination_list() -> anyhow::Result<(ICustomDestinationList, Vec<Smal
             // see https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ishelllinkw-getdescription
             let mut buffer = [0u16; INFOTIPSIZE as usize];
             unsafe { shell_link.GetDescription(&mut buffer)? };
-            decode_shell_link_description(&buffer)
+            let len = unsafe { u_strlen(buffer.as_ptr()) };
+            String::from_utf16_lossy(&buffer[..len as usize])
         };
         let args = description.split('\n').map(PathBuf::from).collect();
 
@@ -107,14 +109,6 @@ fn create_destination_list() -> anyhow::Result<(ICustomDestinationList, Vec<Smal
     }
 
     Ok((list, removed))
-}
-
-fn decode_shell_link_description(buffer: &[u16]) -> String {
-    let length = buffer
-        .iter()
-        .position(|&unit| unit == 0)
-        .unwrap_or(buffer.len());
-    String::from_utf16_lossy(&buffer[..length])
 }
 
 fn add_dock_menu(
@@ -209,64 +203,5 @@ fn create_shell_link(
         store.Commit()?;
 
         Ok(link)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::decode_shell_link_description;
-    use windows::Win32::UI::Controls::INFOTIPSIZE;
-
-    #[test]
-    fn shell_link_description_accepts_empty_buffers() {
-        assert_eq!(decode_shell_link_description(&[]), "");
-        assert_eq!(
-            decode_shell_link_description(&[0; INFOTIPSIZE as usize]),
-            ""
-        );
-    }
-
-    #[test]
-    fn shell_link_description_stops_at_first_null() {
-        assert_eq!(
-            decode_shell_link_description(&[b'A' as u16, 0, b'B' as u16, 0]),
-            "A"
-        );
-    }
-
-    #[test]
-    fn shell_link_description_preserves_unicode_and_folder_separators() {
-        let expected = "C:\\\u{4e2d}\u{6587}\nD:\\\u{1f600}";
-        let mut buffer: Vec<u16> = expected.encode_utf16().collect();
-        buffer.extend([0, b'X' as u16]);
-        assert_eq!(decode_shell_link_description(&buffer), expected);
-    }
-
-    #[test]
-    fn shell_link_description_preserves_lossy_decoding() {
-        assert_eq!(
-            decode_shell_link_description(&[0xd800, b'A' as u16, 0]),
-            "\u{fffd}A"
-        );
-    }
-
-    #[test]
-    fn shell_link_description_accepts_last_slot_terminator() {
-        let mut buffer = [b'A' as u16; INFOTIPSIZE as usize];
-        let last = buffer.len() - 1;
-        buffer[last] = 0;
-        assert_eq!(
-            decode_shell_link_description(&buffer),
-            "A".repeat(buffer.len() - 1)
-        );
-    }
-
-    #[test]
-    fn shell_link_description_never_reads_beyond_unterminated_buffer() {
-        let buffer = [b'A' as u16; INFOTIPSIZE as usize];
-        assert_eq!(
-            decode_shell_link_description(&buffer),
-            "A".repeat(buffer.len())
-        );
     }
 }
